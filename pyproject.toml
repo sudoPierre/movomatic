@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "movomatic"
 version = "1.0.0"
-description = "Instagram Reel ➜ Gemini ➜ Jellyseerr : demandez un film ou une série depuis la feuille de partage iOS."
+description = "Instagram Reel ➜ Gemini ➜ Jellyseerr: request a movie or series straight from the iOS share sheet."
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.11"
@@ -23,7 +23,7 @@ dependencies = [
     "pydantic-settings==2.16.1",
     "google-genai==2.33.0",
     "httpx==0.28.1",
-    # Instagram change souvent : mettez à jour avec `deploy/install_lxc.sh --update`.
+    # Instagram changes often: update with `deploy/install_lxc.sh --update`.
     "yt-dlp==2026.10.21",
 ]
 

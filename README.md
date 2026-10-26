@@ -1,174 +1,191 @@
 # 🎬 Movomatic
 
-**Partage un Reel Instagram depuis ton iPhone ➜ le film, la série ou l'anime est automatiquement demandé sur Jellyseerr.**
+**Share an Instagram Reel from your iPhone ➜ the movie, series or anime is requested on Jellyseerr automatically.**
 
-Movomatic est un microservice FastAPI léger :
+Movomatic is a lightweight FastAPI microservice. It:
 
-1. il reçoit l'URL d'un Reel Instagram envoyée par un **Raccourci iOS** (feuille de partage) ;
-2. il en extrait la légende, les hashtags et l'auteur avec **yt-dlp** ;
-3. il demande à **Google Gemini 2.5 Flash** d'identifier l'œuvre (et, si la légende ne suffit pas, il analyse **la vidéo elle-même** : images, texte à l'écran et audio) ;
-4. il recherche l'œuvre sur TMDB via **Jellyseerr**, détecte les **animes** et envoie la requête, que Jellyseerr transmet à **Radarr / Sonarr**.
+1. receives an Instagram Reel URL sent by an **iOS Shortcut** from the share sheet;
+2. extracts the caption, hashtags and author with **yt-dlp**;
+3. asks **Google Gemini 2.5 Flash** to identify the title. If the caption is not enough, Gemini analyses **the video itself** (frames, on-screen text and audio);
+4. looks the title up on TMDB through **Jellyseerr**, detects **anime**, and sends the request, which Jellyseerr forwards to **Radarr / Sonarr**.
 
 ```
-iPhone ─► Raccourci iOS ─► POST /movomatic ─► yt-dlp ─► Gemini ─► Jellyseerr ─► Radarr / Sonarr
-                                     ▲                                                 │
-                                     └──────────── « ✅ Film demandé : Dune (2021) » ◄───┘
+iPhone ─► iOS Shortcut ─► POST /movomatic ─► yt-dlp ─► Gemini ─► Jellyseerr ─► Radarr / Sonarr
+                                    ▲                                                 │
+                                    └───────────── "✅ Movie requested: Dune (2021)" ◄─┘
 ```
 
-Movomatic est conçu pour tourner **nativement dans un conteneur LXC Debian/Ubuntu sur Proxmox VE**, sans Docker : un environnement virtuel Python et un service `systemd`.
+Movomatic is built to run **natively in a Debian/Ubuntu LXC container on Proxmox VE**, without Docker. It uses a Python virtual environment and a `systemd` service.
 
 ---
 
-## Sommaire
+## Contents
 
-- [Fonctionnalités](#fonctionnalités)
-- [Prérequis](#prérequis)
-- [Installation sur Proxmox (LXC)](#installation-sur-proxmox-lxc)
+- [Features](#features)
+- [Requirements](#requirements)
+- [One-command Proxmox install](#one-command-proxmox-install)
+- [Manual install in an existing LXC](#manual-install-in-an-existing-lxc)
 - [Configuration](#configuration)
-- [Raccourci iOS](#raccourci-ios)
+- [iOS Shortcut](#ios-shortcut)
 - [API](#api)
-- [Cookies Instagram](#cookies-instagram)
-- [Exploitation](#exploitation)
-- [Dépannage](#dépannage)
-- [Développement](#développement)
-- [Sécurité](#sécurité)
-- [Licence](#licence)
+- [Instagram cookies](#instagram-cookies)
+- [Operations](#operations)
+- [Troubleshooting](#troubleshooting)
+- [Development](#development)
+- [Security](#security)
+- [License](#license)
 
-## Fonctionnalités
+## Features
 
-- 🔐 Authentification par clé API (`X-API-Key`, comparaison à temps constant).
-- 🧠 Identification en deux temps : **texte d'abord** (rapide et peu coûteux), **vidéo ensuite** si la confiance est inférieure au seuil.
-- 📐 Sortie **JSON structurée** imposée à Gemini (schéma Pydantic), sans parsing fragile.
-- 🎯 Choix du bon résultat TMDB par score (titre, titre original, année, type, popularité).
-- 🍥 Détection des animes (genre Animation + langue japonaise) avec surcharges optionnelles du serveur, du profil de qualité et du dossier racine Sonarr/Radarr.
-- ♻️ Pas de doublons : les œuvres déjà disponibles ou déjà demandées sont signalées sans nouvelle requête.
-- 🧪 Mode `dry_run` pour identifier sans rien demander.
-- 🧹 Les vidéos temporaires sont supprimées localement **et** côté Gemini après analyse.
-- 🛡️ Service systemd durci (utilisateur dédié, `ProtectSystem=strict`, `PrivateTmp`…).
+- 🔐 API key authentication (`X-API-Key`, compared in constant time).
+- 🧠 Two-step identification: **text first** (fast and cheap), then **video** when confidence is below the threshold.
+- 📐 **Structured JSON output** enforced on Gemini through a Pydantic schema, so no fragile parsing.
+- 🎯 Picks the right TMDB result with a scoring system: title, original title, year, type and popularity.
+- 🍥 Anime detection (Animation genre + Japanese language), with optional overrides for the Sonarr/Radarr server, quality profile and root folder.
+- ♻️ No duplicates: titles that are already available or already requested are reported without a new request.
+- 🧪 `dry_run` mode to identify without requesting anything.
+- 🧹 Temporary videos are deleted locally **and** on the Gemini side after analysis.
+- 🛡️ Hardened systemd service (dedicated user, `ProtectSystem=strict`, `PrivateTmp`…).
+- 📦 One-command container creation on the Proxmox host.
 
-## Prérequis
+## Requirements
 
-| Élément | Détail |
+| Item | Details |
 |---|---|
-| Proxmox VE | 7 ou 8, conteneur LXC **Debian 12+** ou **Ubuntu 22.04+** (Python ≥ 3.11) |
-| Ressources | 1 vCPU, 512 Mo de RAM, 4 Go de disque suffisent |
-| Gemini | Une clé API gratuite : <https://aistudio.google.com/apikey> |
-| Jellyseerr | Une instance configurée avec Radarr/Sonarr et sa clé API (*Paramètres ➜ Général*) |
-| Réseau | Le LXC doit joindre Internet (Instagram, Gemini) et Jellyseerr |
+| Proxmox VE | 7 or 8. The container runs **Debian 12/13** or **Ubuntu 24.04** (Python ≥ 3.11) |
+| Resources | 1 vCPU, 512 MB RAM and 4 GB of disk are enough |
+| Gemini | A free API key: <https://aistudio.google.com/apikey> |
+| Jellyseerr | An instance set up with Radarr/Sonarr, plus its API key (*Settings ➜ General*) |
+| Network | The container must reach the Internet (Instagram, Gemini) and Jellyseerr |
 
-## Installation sur Proxmox (LXC)
+## One-command Proxmox install
 
-### 1. Créer le conteneur
-
-Via l'interface Proxmox (*Créer CT*) ou en ligne de commande sur l'hôte :
+Run this as root in the **Proxmox VE host** shell (*Datacenter ➜ your node ➜ Shell*):
 
 ```bash
-pveam update
-pveam download local debian-12-standard_12.7-1_amd64.tar.zst   # adaptez à la version listée par `pveam available`
-
-pct create 120 local:vztmpl/debian-12-standard_12.7-1_amd64.tar.zst \
-  --hostname movomatic --cores 1 --memory 512 --swap 512 \
-  --rootfs local-lvm:4 --net0 name=eth0,bridge=vmbr0,ip=dhcp \
-  --unprivileged 1 --features nesting=1 --onboot 1
-pct start 120
-pct enter 120
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/sudoPierre/movomatic/main/deploy/create_lxc.sh)"
 ```
 
-> `nesting=1` permet au durcissement systemd (espaces de noms) de fonctionner dans un LXC non privilégié.
+[`deploy/create_lxc.sh`](deploy/create_lxc.sh) asks for your Gemini key, Jellyseerr URL and Jellyseerr key, then shows a summary and asks for confirmation. After that it:
 
-### 2. Installer Movomatic
+1. downloads the latest Debian 12 template (`pveam`) if needed;
+2. creates an **unprivileged** container with `nesting=1` (needed for systemd hardening), start on boot, the host timezone and the `movomatic` tag;
+3. starts it and waits until the network is up;
+4. clones this repository and runs [`install_lxc.sh`](deploy/install_lxc.sh) inside it. Secrets are passed through a temporary `600` file, never on the command line.
 
-Dans le conteneur :
+It ends by printing the endpoint URL and the generated API key for the iOS Shortcut.
+
+Defaults: next free CT ID, `movomatic` hostname, 1 vCPU, 512 MB RAM, 4 GB on `local-lvm`, DHCP on `vmbr0`. Every value can be changed:
+
+```bash
+# Static IP, VLAN, more RAM, SSH key, fully non-interactive
+GEMINI_API_KEY=xxx JELLYSEERR_URL=http://192.168.1.20:5055 JELLYSEERR_API_KEY=yyy \
+  ./deploy/create_lxc.sh --ctid 120 --ip 192.168.1.50/24 --gw 192.168.1.1 --vlan 20 \
+                         --memory 1024 --ssh-key ~/.ssh/id_ed25519.pub --yes
+```
+
+| Option | Default | Description |
+|---|---|---|
+| `--ctid ID` | next free | Container ID |
+| `--hostname NAME` | `movomatic` | Hostname |
+| `--os OS` | `debian-12` | `debian-12`, `debian-13` or `ubuntu-24.04` |
+| `--storage NAME` | `local-lvm` | Root disk storage (falls back to the first storage that supports containers) |
+| `--template-storage NAME` | `local` | Where templates are stored |
+| `--disk GB` / `--cores N` / `--memory MB` / `--swap MB` | `4` / `1` / `512` / `512` | Resources |
+| `--bridge NAME` | `vmbr0` | Network bridge |
+| `--ip dhcp\|CIDR` / `--gw IP` | `dhcp` | IPv4 settings (`--gw` is required with a static IP) |
+| `--vlan TAG` / `--dns IP` | — | VLAN tag, DNS server |
+| `--password PW` / `--ssh-key FILE` | — | Root access (otherwise use `pct enter <ID>`) |
+| `--port N` | `8000` | Movomatic port |
+| `--repo URL` / `--branch NAME` | upstream / `main` | Fork or branch to deploy |
+| `-y`, `--yes` | — | No prompts (secrets must be in the environment) |
+
+If provisioning fails, the container is **kept** so you can investigate (`pct enter <ID>`). Remove it with `pct destroy <ID> --force --purge`.
+
+**Update** from the host:
+
+```bash
+pct exec <ID> -- bash -c 'cd /root/movomatic && git pull && ./deploy/install_lxc.sh --update'
+```
+
+## Manual install in an existing LXC
+
+If you already have a Debian/Ubuntu container (with `nesting=1` turned on), run this inside it:
 
 ```bash
 apt update && apt install -y git
 git clone https://github.com/sudoPierre/movomatic.git
 cd movomatic
-sudo ./deploy/install_lxc.sh
+./deploy/install_lxc.sh          # as root (or with sudo)
 ```
 
-Le script :
+The installer:
 
-- installe `python3`, `python3-venv`, `ffmpeg`… ;
-- crée l'utilisateur système `movomatic` ;
-- installe le code dans `/opt/movomatic` avec son propre virtualenv `.venv` ;
-- crée `/etc/movomatic/movomatic.env` (droits `640`), **génère la clé API** et demande les clés Gemini et Jellyseerr ;
-- installe et démarre le service `movomatic.service`, puis vérifie `/health`.
+- installs `python3`, `python3-venv`, `ffmpeg`…;
+- creates the `movomatic` system user;
+- installs the code in `/opt/movomatic` with its own `.venv`;
+- creates `/etc/movomatic/movomatic.env` (mode `640`), **generates the API key** and asks for the Gemini and Jellyseerr keys;
+- installs and starts `movomatic.service`, then checks `/health`.
 
-À la fin, il affiche l'URL de l'endpoint et la clé à mettre dans le Raccourci iOS.
-
-**Installation non interactive :**
+Other commands:
 
 ```bash
-sudo GEMINI_API_KEY=xxx JELLYSEERR_URL=http://192.168.1.20:5055 JELLYSEERR_API_KEY=yyy \
-     ./deploy/install_lxc.sh
+git pull && ./deploy/install_lxc.sh --update   # code + dependencies + latest yt-dlp
+./deploy/install_lxc.sh --uninstall            # keeps /etc/movomatic and /var/lib/movomatic
 ```
 
-### 3. Mettre à jour
-
-```bash
-cd movomatic && git pull
-sudo ./deploy/install_lxc.sh --update   # code + dépendances + dernière version de yt-dlp
-```
-
-> Instagram change régulièrement. Si l'extraction échoue d'un coup, un `--update` (qui met à jour yt-dlp) suffit généralement.
-
-### Désinstaller
-
-```bash
-sudo ./deploy/install_lxc.sh --uninstall   # conserve /etc/movomatic et /var/lib/movomatic
-```
+> Instagram changes often. If extraction suddenly breaks, an `--update` (which upgrades yt-dlp) usually fixes it.
 
 ## Configuration
 
-Toute la configuration se fait par variables d'environnement, dans `/etc/movomatic/movomatic.env` en production ou dans `.env` en développement. Elle est validée au démarrage par `pydantic-settings` : une valeur invalide empêche le service de démarrer et l'erreur apparaît dans `journalctl`. Voir [`.env.example`](.env.example).
+All settings are environment variables, read from `/etc/movomatic/movomatic.env` in production or from `.env` in development. `pydantic-settings` validates them at startup: an invalid value stops the service from starting, and the error shows up in `journalctl`. See [`.env.example`](.env.example).
 
-| Variable | Défaut | Description |
+| Variable | Default | Description |
 |---|---|---|
-| `MOVOMATIC_API_KEY` | — **(requis)** | Clé attendue dans `X-API-Key` (16 caractères min.) |
-| `HOST` / `PORT` | `0.0.0.0` / `8000` | Adresse d'écoute |
+| `MOVOMATIC_API_KEY` | — **(required)** | Key expected in `X-API-Key` (16 characters min.) |
+| `HOST` / `PORT` | `0.0.0.0` / `8000` | Listen address |
 | `LOG_LEVEL` | `info` | `debug`, `info`, `warning`, `error` |
-| `MAX_CONCURRENT_JOBS` | `2` | Reels traités en parallèle |
-| `GEMINI_API_KEY` | — **(requis)** | Clé Google AI Studio |
-| `GEMINI_MODEL` | `gemini-2.5-flash` | Modèle Gemini |
-| `GEMINI_MIN_CONFIDENCE` | `0.6` | Seuil de confiance (0–1) |
-| `GEMINI_VIDEO_FALLBACK` | `true` | Analyser la vidéo si le texte ne suffit pas |
-| `GEMINI_TIMEOUT_SECONDS` | `180` | Délai max. par appel Gemini |
-| `YTDLP_COOKIES_FILE` | *(vide)* | Fichier cookies Netscape pour Instagram |
-| `YTDLP_MAX_FILESIZE_MB` | `100` | Taille max. de la vidéo téléchargée |
-| `YTDLP_MAX_DURATION_SECONDS` | `600` | Durée max. de la vidéo |
-| `TEMP_DIR` | *(vide = /tmp)* | Répertoire temporaire |
-| `JELLYSEERR_URL` | — **(requis)** | ex. `http://192.168.1.20:5055` |
-| `JELLYSEERR_API_KEY` | — **(requis)** | Clé API Jellyseerr |
-| `JELLYSEERR_VERIFY_SSL` | `true` | Vérifier le certificat HTTPS |
-| `JELLYSEERR_REQUEST_4K` | `false` | Demander la version 4K |
-| `JELLYSEERR_USER_ID` | *(vide)* | Demander au nom d'un autre utilisateur |
-| `ANIME_SONARR_SERVER_ID` / `_PROFILE_ID` / `_ROOT_FOLDER` | *(vide)* | Surcharges pour les séries anime |
-| `ANIME_RADARR_SERVER_ID` / `_PROFILE_ID` / `_ROOT_FOLDER` | *(vide)* | Surcharges pour les films anime |
+| `MAX_CONCURRENT_JOBS` | `2` | Reels processed in parallel |
+| `GEMINI_API_KEY` | — **(required)** | Google AI Studio key |
+| `GEMINI_MODEL` | `gemini-2.5-flash` | Gemini model |
+| `GEMINI_MIN_CONFIDENCE` | `0.6` | Confidence threshold (0–1) |
+| `GEMINI_VIDEO_FALLBACK` | `true` | Analyse the video when the text is not enough |
+| `GEMINI_TIMEOUT_SECONDS` | `180` | Max duration of a Gemini call |
+| `YTDLP_COOKIES_FILE` | *(empty)* | Netscape cookies file for Instagram |
+| `YTDLP_MAX_FILESIZE_MB` | `100` | Max size of the downloaded video |
+| `YTDLP_MAX_DURATION_SECONDS` | `600` | Max video duration |
+| `TEMP_DIR` | *(empty = /tmp)* | Temporary directory |
+| `JELLYSEERR_URL` | — **(required)** | e.g. `http://192.168.1.20:5055` |
+| `JELLYSEERR_API_KEY` | — **(required)** | Jellyseerr API key |
+| `JELLYSEERR_VERIFY_SSL` | `true` | Verify the HTTPS certificate |
+| `JELLYSEERR_REQUEST_4K` | `false` | Request the 4K version |
+| `JELLYSEERR_USER_ID` | *(empty)* | Request on behalf of another user |
+| `ANIME_SONARR_SERVER_ID` / `_PROFILE_ID` / `_ROOT_FOLDER` | *(empty)* | Overrides for anime series |
+| `ANIME_RADARR_SERVER_ID` / `_PROFILE_ID` / `_ROOT_FOLDER` | *(empty)* | Overrides for anime movies |
 
-> **Animes :** Jellyseerr applique déjà automatiquement le profil et le dossier « Anime » définis dans *Paramètres ➜ Services ➜ Sonarr*. Les variables `ANIME_*` ne servent qu'à forcer d'autres valeurs. Pour trouver les identifiants : `GET /api/v1/service/sonarr` puis `GET /api/v1/service/sonarr/{id}` sur Jellyseerr.
+> **Anime:** Jellyseerr already applies the "Anime" profile and folder set in *Settings ➜ Services ➜ Sonarr*. The `ANIME_*` variables are only for forcing different values. To find the IDs, call `GET /api/v1/service/sonarr`, then `GET /api/v1/service/sonarr/{id}` on Jellyseerr.
 
-Après modification : `sudo systemctl restart movomatic`.
+After changing anything: `systemctl restart movomatic`.
 
-## Raccourci iOS
+## iOS Shortcut
 
-1. Ouvre **Raccourcis** ➜ **+** ➜ nomme-le « Movomatic ».
-2. Touche **ⓘ** ➜ active **Afficher dans la feuille de partage** ; types acceptés : **URL** et **Texte**.
-3. Ajoute l'action **Obtenir le contenu de l'URL** :
-   - URL : `http://<ip-du-lxc>:8000/movomatic`
-   - Méthode : **POST**
-   - En-têtes : `X-API-Key` = *ta clé* ; `Content-Type` = `application/json`
-   - Corps de la requête : **JSON**, clé `url` (texte) = **Entrée du raccourci**
-4. Ajoute **Obtenir la valeur du dictionnaire** : clé `message`, dans *Contenu de l'URL*.
-5. Ajoute **Afficher la notification** avec *Valeur du dictionnaire*.
+1. Open **Shortcuts** ➜ **+** ➜ name it "Movomatic".
+2. Tap **ⓘ** ➜ turn on **Show in Share Sheet**. Accepted types: **URLs** and **Text**.
+3. Add a **Get Contents of URL** action:
+   - URL: `http://<lxc-ip>:8000/movomatic`
+   - Method: **POST**
+   - Headers: `X-API-Key` = *your key*; `Content-Type` = `application/json`
+   - Request Body: **JSON**, key `url` (Text) = **Shortcut Input**
+4. Add **Get Dictionary Value**: key `message` in *Contents of URL*.
+5. Add **Show Notification** with *Dictionary Value*.
 
-Dans Instagram : **Partager ➜ Movomatic**. Quelques secondes plus tard, une notification affiche par exemple « ✅ Film demandé : Dune: Part Two (2024) ».
+In Instagram, tap **Share ➜ Movomatic**. A few seconds later a notification shows something like "✅ Movie requested: Dune: Part Two (2024)".
 
-> L'analyse vidéo peut prendre 20 à 60 s. Hors de ton réseau local, passe par un VPN (WireGuard, Tailscale…) ou par un reverse proxy HTTPS (voir [Sécurité](#sécurité)).
+> Video analysis can take 20 to 60 seconds. Outside your home network, use a VPN (WireGuard, Tailscale…) or an HTTPS reverse proxy (see [Security](#security)).
 
 ## API
 
-La documentation interactive OpenAPI est disponible sur `http://<ip>:8000/docs`.
+Interactive OpenAPI docs are available at `http://<ip>:8000/docs`.
 
 ### `GET /health`
 
@@ -184,19 +201,19 @@ curl -X POST http://localhost:8000/movomatic \
   -d '{"url": "https://www.instagram.com/reel/C1a2B3c4D5e/?igsh=abc", "dry_run": false}'
 ```
 
-Le champ `url` accepte aussi un texte qui contient le lien (comme ce que renvoie parfois la feuille de partage). Les paramètres de suivi (`?igsh=`, `?utm_source=`) sont supprimés.
+The `url` field also accepts text that contains the link, which is what the share sheet sometimes sends. Tracking parameters (`?igsh=`, `?utm_source=`) are removed.
 
-**Réponse (200) :**
+**Response (200):**
 
 ```json
 {
   "status": "requested",
-  "message": "✅ Film demandé : Dune: Part Two (2024)",
+  "message": "✅ Movie requested: Dune: Part Two (2024)",
   "source": "metadata",
   "identification": {
     "identified": true, "title": "Dune: Part Two", "original_title": null,
     "year": 2024, "media_type": "movie", "is_anime": false,
-    "confidence": 0.96, "reasoning": "La légende cite explicitement Dune 2 et Denis Villeneuve."
+    "confidence": 0.96, "reasoning": "The caption explicitly mentions Dune 2 and Denis Villeneuve."
   },
   "media": {
     "tmdb_id": 693134, "media_type": "movie", "title": "Dune: Part Two", "year": 2024,
@@ -206,93 +223,95 @@ Le champ `url` accepte aussi un texte qui contient le lien (comme ce que renvoie
 }
 ```
 
-| `status` | Signification |
+| `status` | Meaning |
 |---|---|
-| `requested` | Requête créée dans Jellyseerr |
-| `already_available` | Déjà présent dans la médiathèque |
-| `already_requested` | Déjà demandé ou en cours de téléchargement |
-| `identified` | Identifié, aucune requête envoyée (`dry_run`) |
-| `not_identified` | Gemini n'a pas su identifier l'œuvre avec assez de confiance |
-| `not_found` | Œuvre identifiée mais introuvable sur TMDB |
+| `requested` | Request created in Jellyseerr |
+| `already_available` | Already in the library |
+| `already_requested` | Already requested or downloading |
+| `identified` | Identified, no request sent (`dry_run`) |
+| `not_identified` | Gemini could not identify the title with enough confidence |
+| `not_found` | Title identified but not found on TMDB |
 
-**Erreurs :** `401` (clé invalide), `422` (URL invalide ou Reel illisible), `502` (Gemini ou Jellyseerr en erreur). Le corps est toujours `{"status": "error", "message": "❌ …"}`, donc le Raccourci affiche aussi un message clair.
+**Errors:** `401` (invalid key), `422` (invalid URL or unreadable Reel), `502` (Gemini or Jellyseerr error). The body is always `{"status": "error", "message": "❌ …"}`, so the Shortcut still shows a clear message.
 
-## Cookies Instagram
+## Instagram cookies
 
-Sans connexion, Instagram bloque souvent l'accès aux Reels (« login required », « rate-limit »). Pour y remédier :
+Without a logged-in session, Instagram often blocks access to Reels ("login required", "rate-limit"). To fix it:
 
-1. Sur un navigateur connecté à Instagram (de préférence avec un compte secondaire), exporte les cookies au format **Netscape**, par exemple avec l'extension « Get cookies.txt LOCALLY ».
-2. Copie-les dans le LXC :
+1. In a browser logged into Instagram (ideally with a secondary account), export the cookies in **Netscape** format, for example with the "Get cookies.txt LOCALLY" extension.
+2. Copy them into the container:
    ```bash
-   sudo install -o movomatic -g movomatic -m 600 cookies.txt /var/lib/movomatic/cookies.txt
+   install -o movomatic -g movomatic -m 600 cookies.txt /var/lib/movomatic/cookies.txt
    ```
-3. Dans `/etc/movomatic/movomatic.env` : `YTDLP_COOKIES_FILE=/var/lib/movomatic/cookies.txt`
-4. `sudo systemctl restart movomatic`
+3. In `/etc/movomatic/movomatic.env`, set `YTDLP_COOKIES_FILE=/var/lib/movomatic/cookies.txt`.
+4. Run `systemctl restart movomatic`.
 
-> Le fichier doit être dans `/var/lib/movomatic` : c'est le seul répertoire où le service a le droit d'écrire (yt-dlp met à jour les cookies).
+> The file must be in `/var/lib/movomatic`: it is the only directory the service can write to, and yt-dlp updates the cookies.
 
-## Exploitation
+## Operations
 
 ```bash
-systemctl status movomatic         # état
-journalctl -u movomatic -f         # logs en direct
-sudo systemctl restart movomatic   # redémarrage
+systemctl status movomatic     # status
+journalctl -u movomatic -f     # live logs
+systemctl restart movomatic    # restart
 ```
 
-| Chemin | Contenu |
+| Path | Contents |
 |---|---|
 | `/opt/movomatic` | Code + virtualenv (`.venv`) |
-| `/etc/movomatic/movomatic.env` | Configuration et secrets |
-| `/var/lib/movomatic` | Cookies Instagram |
-| `/var/cache/movomatic` | Cache yt-dlp |
+| `/etc/movomatic/movomatic.env` | Configuration and secrets |
+| `/var/lib/movomatic` | Instagram cookies |
+| `/var/cache/movomatic` | yt-dlp cache |
 
-## Dépannage
+## Troubleshooting
 
-| Symptôme | Piste |
+| Symptom | What to check |
 |---|---|
-| `status=226/NAMESPACE` au démarrage | Active `nesting=1` sur le LXC (`pct set 120 --features nesting=1`) ou commente les lignes `Protect*`/`Private*` du service |
-| `Reel illisible : … login required` | Configure les [cookies Instagram](#cookies-instagram) |
-| Erreurs d'extraction soudaines | `sudo ./deploy/install_lxc.sh --update` (nouvelle version de yt-dlp) |
-| `clé API Jellyseerr refusée` | Vérifie `JELLYSEERR_API_KEY` |
-| `Jellyseerr injoignable` | Vérifie `JELLYSEERR_URL` depuis le LXC : `curl $JELLYSEERR_URL/api/v1/status` |
-| `erreur API Gemini (429)` | Quota gratuit dépassé : attends ou active la facturation |
-| Le service ne démarre pas | `journalctl -u movomatic -n 50` affiche l'erreur de validation de configuration |
-| Mauvaise œuvre identifiée | Teste avec `"dry_run": true` et `LOG_LEVEL=debug` ; augmente `GEMINI_MIN_CONFIDENCE` |
+| `status=226/NAMESPACE` at startup | Turn on nesting (`pct set <ID> --features nesting=1`, then restart the CT) or comment out the `Protect*`/`Private*` lines in the unit |
+| `Could not read the Reel: … login required` | Set up [Instagram cookies](#instagram-cookies) |
+| Extraction suddenly fails | `./deploy/install_lxc.sh --update` (new yt-dlp release) |
+| `Jellyseerr API key rejected` | Check `JELLYSEERR_API_KEY` |
+| `Jellyseerr unreachable` | From the CT, run `curl $JELLYSEERR_URL/api/v1/status` |
+| `Gemini API error (429)` | Free quota exceeded: wait or turn on billing |
+| Service does not start | `journalctl -u movomatic -n 50` shows the configuration validation error |
+| Wrong title identified | Try `"dry_run": true` with `LOG_LEVEL=debug`; raise `GEMINI_MIN_CONFIDENCE` |
+| `create_lxc.sh`: no network | Check the bridge/VLAN/gateway, or use `--dns` |
 
-## Développement
+## Development
 
 ```bash
 git clone https://github.com/sudoPierre/movomatic.git && cd movomatic
 python3 -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
-cp .env.example .env   # puis renseigne les clés
-pytest                 # tests unitaires (yt-dlp, Gemini et Jellyseerr sont mockés)
-movomatic              # ou : uvicorn app.main:app --reload
+cp .env.example .env   # then fill in the keys
+pytest                 # unit tests (yt-dlp, Gemini and Jellyseerr are mocked)
+movomatic              # or: uvicorn app.main:app --reload
 ```
 
-Structure :
+Layout:
 
 ```text
 app/
-├── main.py        # FastAPI, routes et orchestration du pipeline
-├── config.py      # Configuration (pydantic-settings)
-├── models.py      # Schémas API + schéma de sortie Gemini
-├── extractor.py   # yt-dlp : métadonnées et téléchargement temporaire
-├── analyzer.py    # Gemini : analyse du texte puis de la vidéo
-└── jellyseerr.py  # Recherche TMDB, scoring, détection anime, requête
+├── main.py         # FastAPI routes and pipeline orchestration
+├── config.py       # Settings (pydantic-settings)
+├── models.py       # API schemas + Gemini output schema
+├── extractor.py    # yt-dlp: metadata and temporary download
+├── analyzer.py     # Gemini: text analysis, then video
+└── jellyseerr.py   # TMDB search, scoring, anime detection, request
 deploy/
-├── install_lxc.sh
+├── create_lxc.sh   # Proxmox host: creates and provisions the container
+├── install_lxc.sh  # Inside the container: installs/updates the service
 └── movomatic.service
 tests/test_api.py
 ```
 
-## Sécurité
+## Security
 
-- **N'expose pas** le port 8000 directement sur Internet. Préfère un VPN (WireGuard, Tailscale) ou un reverse proxy HTTPS (Caddy, Nginx Proxy Manager, Traefik). Avec un proxy sur la même machine, mets `HOST=127.0.0.1`.
-- La clé `MOVOMATIC_API_KEY` est générée aléatoirement (256 bits) par le script d'installation.
-- Les secrets ne sont lisibles que par root et le groupe `movomatic` (`640`).
-- Les vidéos analysées sont envoyées à l'API Google Gemini, puis supprimées après analyse.
+- **Do not** expose port 8000 directly to the Internet. Use a VPN (WireGuard, Tailscale) or an HTTPS reverse proxy (Caddy, Nginx Proxy Manager, Traefik). With a proxy on the same machine, set `HOST=127.0.0.1`.
+- The installer generates `MOVOMATIC_API_KEY` at random (256 bits).
+- Secrets are readable only by root and the `movomatic` group (`640`).
+- Analysed videos are sent to the Google Gemini API, then deleted after analysis.
 
-## Licence
+## License
 
 [MIT](LICENSE)

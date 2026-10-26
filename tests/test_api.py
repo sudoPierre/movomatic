@@ -1,4 +1,4 @@
-"""Tests de l'API Movomatic : yt-dlp et Gemini sont mockés, Jellyseerr est simulé avec respx."""
+"""Movomatic API tests: yt-dlp and Gemini are mocked, Jellyseerr is simulated with respx."""
 
 import asyncio
 from pathlib import Path
@@ -53,7 +53,7 @@ def make_settings(**overrides) -> Settings:
 
 def ident(**kw) -> MediaIdentification:
     base = {"identified": True, "title": "Dune: Part Two", "year": 2024,
-            "media_type": "movie", "is_anime": False, "confidence": 0.95, "reasoning": "titre dans la légende"}
+            "media_type": "movie", "is_anime": False, "confidence": 0.95, "reasoning": "title in the caption"}
     return MediaIdentification(**{**base, **kw})
 
 
@@ -86,7 +86,7 @@ def make_client(jellyseerr_mock):
         )
         app.state.services = services
         created.append(services)
-        # Sans `with`, TestClient n'exécute pas le lifespan : nos services mockés restent en place.
+        # Without `with`, TestClient skips the lifespan, so our mocked services stay in place.
         return TestClient(app), services
 
     yield _make
@@ -97,7 +97,7 @@ def post(client: TestClient, url: str = REEL, key: str = API_KEY, **extra):
 
 
 # --------------------------------------------------------------------------- #
-# Routes de base & sécurité
+# Basic routes & security
 # --------------------------------------------------------------------------- #
 def test_health(make_client):
     client, _ = make_client()
@@ -125,7 +125,7 @@ def test_rejects_non_instagram_url(make_client):
     [
         "https://www.instagram.com/reel/C1a2B3c4D5e/?igsh=MWQ1ZGUxMzBkMA==",
         "https://instagram.com/reel/C1a2B3c4D5e",
-        "Regarde ça ! https://www.instagram.com/reel/C1a2B3c4D5e/?utm_source=ig_web_copy_link",
+        "Check this out! https://www.instagram.com/reel/C1a2B3c4D5e/?utm_source=ig_web_copy_link",
     ],
 )
 def test_url_normalization(raw):
@@ -133,7 +133,7 @@ def test_url_normalization(raw):
 
 
 # --------------------------------------------------------------------------- #
-# Pipeline complet
+# Full pipeline
 # --------------------------------------------------------------------------- #
 def test_movie_is_requested(make_client, jellyseerr_mock):
     client, services = make_client()
@@ -149,7 +149,7 @@ def test_movie_is_requested(make_client, jellyseerr_mock):
     assert data["source"] == "metadata"
     assert data["media"]["tmdb_id"] == 693134
     assert data["media"]["poster_url"] == "https://image.tmdb.org/t/p/w500/poster.jpg"
-    # Encodage strict exigé par Jellyseerr.
+    # Strict encoding required by Jellyseerr.
     assert "query=Dune%3A%20Part%20Two" in str(search.calls.last.request.url)
     assert request.calls.last.request.headers["X-Api-Key"] == "fake-jellyseerr-key"
     assert httpx.Response(200, content=request.calls.last.request.content).json() == {
@@ -243,7 +243,7 @@ def test_best_match_prefers_year_and_type(make_client, jellyseerr_mock):
 
 
 # --------------------------------------------------------------------------- #
-# Erreurs amont
+# Upstream errors
 # --------------------------------------------------------------------------- #
 def test_extraction_error_returns_422(make_client):
     client, services = make_client()

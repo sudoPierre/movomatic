@@ -1,4 +1,4 @@
-"""Schémas Pydantic : entrées/sorties de l'API et schéma de réponse structurée Gemini."""
+"""Pydantic schemas: API input/output and Gemini structured-output schema."""
 
 import re
 from enum import Enum
@@ -13,37 +13,37 @@ _INSTAGRAM_PATHS = ("/reel/", "/reels/", "/p/", "/tv/")
 
 
 # --------------------------------------------------------------------------- #
-# API — entrée
+# API — input
 # --------------------------------------------------------------------------- #
 class MovomaticRequest(BaseModel):
-    """Corps envoyé par le Raccourci iOS.
+    """Body sent by the iOS Shortcut.
 
-    Le champ ``url`` accepte aussi un texte partagé contenant l'URL
-    (la feuille de partage iOS ajoute parfois du texte autour du lien).
+    The ``url`` field also accepts shared text containing the URL
+    (the iOS share sheet sometimes adds text around the link).
     """
 
     url: str = Field(..., max_length=2048, examples=["https://www.instagram.com/reel/C1a2B3c4D5e/"])
-    dry_run: bool = Field(False, description="Identifie sans envoyer de requête à Jellyseerr.")
+    dry_run: bool = Field(False, description="Identify without sending a request to Jellyseerr.")
 
     @field_validator("url")
     @classmethod
     def _normalize_instagram_url(cls, v: str) -> str:
         match = _URL_RE.search(v.strip())
         if not match:
-            raise ValueError("aucune URL trouvée dans le champ 'url'")
+            raise ValueError("no URL found in the 'url' field")
         parts = urlsplit(match.group(0).rstrip(").,;!?\"'"))
         host = (parts.hostname or "").lower()
         if host not in _INSTAGRAM_HOSTS:
-            raise ValueError("l'URL doit pointer vers instagram.com")
+            raise ValueError("the URL must point to instagram.com")
         path = parts.path if parts.path.endswith("/") else parts.path + "/"
         if not path.startswith(_INSTAGRAM_PATHS):
-            raise ValueError("l'URL doit être celle d'un Reel ou d'une publication Instagram")
-        # On retire les paramètres de suivi (?igsh=..., ?utm_source=...).
+            raise ValueError("the URL must be an Instagram Reel or post")
+        # Strip tracking parameters (?igsh=..., ?utm_source=...).
         return urlunsplit(("https", "www.instagram.com", path, "", ""))
 
 
 # --------------------------------------------------------------------------- #
-# Extraction yt-dlp
+# yt-dlp extraction
 # --------------------------------------------------------------------------- #
 class ReelMetadata(BaseModel):
     url: str
@@ -56,31 +56,31 @@ class ReelMetadata(BaseModel):
 
     def as_prompt_text(self) -> str:
         lines = [
-            f"Auteur : {self.uploader or 'inconnu'}",
-            f"Titre : {self.title or ''}",
-            f"Légende : {self.description or ''}",
+            f"Author: {self.uploader or 'unknown'}",
+            f"Title: {self.title or ''}",
+            f"Caption: {self.description or ''}",
         ]
         if self.tags:
-            lines.append("Hashtags : " + " ".join(f"#{t}" for t in self.tags))
+            lines.append("Hashtags: " + " ".join(f"#{t}" for t in self.tags))
         return "\n".join(lines)
 
 
 # --------------------------------------------------------------------------- #
-# Gemini — schéma de sortie structurée
+# Gemini — structured output schema
 # --------------------------------------------------------------------------- #
 class MediaIdentification(BaseModel):
-    """Schéma JSON imposé à Gemini via ``response_schema``."""
+    """JSON schema enforced on Gemini through ``response_schema``."""
 
-    identified: bool = Field(description="true si une œuvre précise a été identifiée avec certitude raisonnable.")
-    title: Optional[str] = Field(None, description="Titre le plus connu (de préférence le titre international/anglais).")
-    original_title: Optional[str] = Field(None, description="Titre original dans la langue d'origine, si différent.")
-    year: Optional[int] = Field(None, description="Année de sortie (film) ou de première diffusion (série).")
+    identified: bool = Field(description="true if a specific work was identified with reasonable certainty.")
+    title: Optional[str] = Field(None, description="Best-known title (preferably the international/English title).")
+    original_title: Optional[str] = Field(None, description="Original-language title, if different.")
+    year: Optional[int] = Field(None, description="Release year (movie) or first air year (series).")
     media_type: Optional[Literal["movie", "tv"]] = Field(
-        None, description="'movie' pour un film, 'tv' pour une série ou un anime en épisodes."
+        None, description="'movie' for a film, 'tv' for a series or episodic anime."
     )
-    is_anime: bool = Field(description="true s'il s'agit d'une animation japonaise (anime).")
-    confidence: float = Field(description="Confiance entre 0.0 et 1.0.")
-    reasoning: str = Field("", description="Justification courte (une ou deux phrases).")
+    is_anime: bool = Field(description="true if this is Japanese animation (anime).")
+    confidence: float = Field(description="Confidence between 0.0 and 1.0.")
+    reasoning: str = Field("", description="Short justification (one or two sentences).")
 
     @field_validator("confidence")
     @classmethod
@@ -89,7 +89,7 @@ class MediaIdentification(BaseModel):
 
 
 # --------------------------------------------------------------------------- #
-# API — sortie
+# API — output
 # --------------------------------------------------------------------------- #
 class Status(str, Enum):
     REQUESTED = "requested"
@@ -111,7 +111,7 @@ class MediaResult(BaseModel):
 
 class MovomaticResponse(BaseModel):
     status: Status
-    message: str = Field(description="Message court, prêt à être affiché dans une notification iOS.")
+    message: str = Field(description="Short message, ready to be shown in an iOS notification.")
     source: Optional[Literal["metadata", "video"]] = None
     identification: Optional[MediaIdentification] = None
     media: Optional[MediaResult] = None

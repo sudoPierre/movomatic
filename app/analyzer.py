@@ -1,4 +1,4 @@
-"""Identification de l'œuvre via Gemini (analyse du texte, puis fallback sur la vidéo)."""
+"""Title identification with Gemini (text analysis first, then video fallback)."""
 
 import asyncio
 import logging
@@ -37,7 +37,7 @@ Rules:
 
 
 class AnalysisError(RuntimeError):
-    """Gemini n'a pas pu produire une réponse exploitable."""
+    """Gemini could not produce a usable answer."""
 
 
 class GeminiAnalyzer:
@@ -73,18 +73,18 @@ class GeminiAnalyzer:
             if uploaded.name:
                 try:
                     await client.aio.files.delete(name=uploaded.name)
-                except Exception:  # noqa: BLE001 — le nettoyage ne doit jamais faire échouer la requête
-                    logger.warning("Impossible de supprimer le fichier Gemini %s", uploaded.name)
+                except Exception:  # noqa: BLE001 — cleanup must never fail the request
+                    logger.warning("Could not delete Gemini file %s", uploaded.name)
 
     async def _wait_until_active(self, file: types.File) -> types.File:
         deadline = asyncio.get_running_loop().time() + self._settings.gemini_timeout_seconds
         while file.state == types.FileState.PROCESSING:
             if asyncio.get_running_loop().time() > deadline:
-                raise AnalysisError("délai dépassé pendant le traitement de la vidéo par Gemini")
+                raise AnalysisError("timed out while Gemini was processing the video")
             await asyncio.sleep(2)
             file = await self._client.aio.files.get(name=file.name)
         if file.state == types.FileState.FAILED:
-            raise AnalysisError("Gemini n'a pas pu traiter la vidéo")
+            raise AnalysisError("Gemini failed to process the video")
         return file
 
     async def _generate(self, contents: list) -> MediaIdentification:
@@ -98,9 +98,9 @@ class GeminiAnalyzer:
                 timeout=self._settings.gemini_timeout_seconds,
             )
         except asyncio.TimeoutError as exc:
-            raise AnalysisError("délai dépassé lors de l'appel à Gemini") from exc
+            raise AnalysisError("Gemini call timed out") from exc
         except genai_errors.APIError as exc:
-            raise AnalysisError(f"erreur API Gemini ({exc.code}) : {exc.message}") from exc
+            raise AnalysisError(f"Gemini API error ({exc.code}): {exc.message}") from exc
 
         parsed = response.parsed
         if isinstance(parsed, MediaIdentification):
@@ -110,7 +110,7 @@ class GeminiAnalyzer:
             try:
                 result = MediaIdentification.model_validate_json(text)
             except ValueError as exc:
-                raise AnalysisError("réponse Gemini illisible") from exc
+                raise AnalysisError("unreadable Gemini response") from exc
         logger.info(
             "Gemini: identified=%s title=%r year=%s type=%s anime=%s confidence=%.2f",
             result.identified, result.title, result.year,

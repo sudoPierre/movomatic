@@ -1,4 +1,4 @@
-"""Extraction des Reels Instagram via yt-dlp (métadonnées + téléchargement temporaire)."""
+"""Instagram Reel extraction with yt-dlp (metadata + temporary video download)."""
 
 import asyncio
 import logging
@@ -14,11 +14,11 @@ logger = logging.getLogger(__name__)
 
 
 class ExtractionError(RuntimeError):
-    """Le Reel n'a pas pu être lu (privé, supprimé, connexion requise, etc.)."""
+    """The Reel could not be read (private, deleted, login required, etc.)."""
 
 
 class _YtdlpLogger:
-    """Redirige les messages yt-dlp vers le logging standard."""
+    """Forwards yt-dlp messages to standard logging."""
 
     def debug(self, msg: str) -> None:
         if not msg.startswith("[debug] "):
@@ -53,11 +53,11 @@ class ReelExtractor:
             if cookies.is_file():
                 opts["cookiefile"] = str(cookies)
             else:
-                logger.warning("Fichier de cookies introuvable : %s", cookies)
+                logger.warning("Cookies file not found: %s", cookies)
         return opts
 
     # ------------------------------------------------------------------ #
-    # Métadonnées
+    # Metadata
     # ------------------------------------------------------------------ #
     def _extract_metadata_sync(self, url: str) -> ReelMetadata:
         opts = self._base_opts() | {"skip_download": True}
@@ -67,8 +67,8 @@ class ReelExtractor:
         except yt_dlp.utils.DownloadError as exc:
             raise ExtractionError(_clean_error(exc)) from exc
         if not info:
-            raise ExtractionError("aucune donnée renvoyée par yt-dlp")
-        # Un carrousel (/p/) peut renvoyer une playlist : on prend la première vidéo.
+            raise ExtractionError("yt-dlp returned no data")
+        # A carousel (/p/) may return a playlist: take the first video.
         if info.get("_type") == "playlist" and info.get("entries"):
             first = next((e for e in info["entries"] if e), None)
             info = {**info, **(first or {})}
@@ -86,13 +86,13 @@ class ReelExtractor:
         return await asyncio.to_thread(self._extract_metadata_sync, url)
 
     # ------------------------------------------------------------------ #
-    # Téléchargement vidéo (fallback)
+    # Video download (fallback)
     # ------------------------------------------------------------------ #
     def _download_sync(self, url: str, dest_dir: Path) -> Path:
         s = self._settings
         opts = self._base_opts() | {
             "outtmpl": str(dest_dir / "%(id)s.%(ext)s"),
-            # 720p max avec audio : suffisant pour Gemini et économe en tokens.
+            # 720p max with audio: good enough for Gemini and cheap on tokens.
             "format": "bv*[height<=720]+ba/b[height<=720]/bv*+ba/b",
             "merge_output_format": "mp4",
             "max_filesize": s.ytdlp_max_filesize_mb * 1024 * 1024,
@@ -109,7 +109,7 @@ class ReelExtractor:
         files = [p for p in dest_dir.iterdir() if p.is_file() and not p.name.endswith((".part", ".ytdl"))]
         if not files:
             raise ExtractionError(
-                "vidéo non téléchargée (trop longue, trop lourde ou indisponible)"
+                "video not downloaded (too long, too large or unavailable)"
             )
         return max(files, key=lambda p: p.stat().st_size)
 

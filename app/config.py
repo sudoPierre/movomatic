@@ -1,4 +1,4 @@
-"""Configuration de l'application, chargée depuis l'environnement ou un fichier .env."""
+"""Application settings, loaded from the environment or a .env file."""
 
 from functools import lru_cache
 from pathlib import Path
@@ -16,12 +16,12 @@ class Settings(BaseSettings):
         case_sensitive=False,
     )
 
-    # --- Sécurité de l'API Movomatic ---
+    # --- Movomatic API security ---
     movomatic_api_key: SecretStr = Field(
-        ..., min_length=16, description="Clé attendue dans l'en-tête X-API-Key."
+        ..., min_length=16, description="Key expected in the X-API-Key header."
     )
 
-    # --- Serveur ---
+    # --- Server ---
     host: str = "0.0.0.0"
     port: int = Field(8000, ge=1, le=65535)
     log_level: Literal["debug", "info", "warning", "error"] = "info"
@@ -46,9 +46,9 @@ class Settings(BaseSettings):
     jellyseerr_timeout_seconds: float = Field(20.0, gt=0)
     jellyseerr_verify_ssl: bool = True
     jellyseerr_request_4k: bool = False
-    # Identifiant d'utilisateur Jellyseerr au nom duquel la requête est faite (optionnel).
+    # Jellyseerr user ID to make requests on behalf of (optional).
     jellyseerr_user_id: Optional[int] = None
-    # Surcharges optionnelles pour les animes (sinon Jellyseerr applique ses propres règles).
+    # Optional anime overrides (otherwise Jellyseerr applies its own rules).
     anime_sonarr_server_id: Optional[int] = None
     anime_sonarr_profile_id: Optional[int] = None
     anime_sonarr_root_folder: Optional[str] = None
@@ -60,7 +60,7 @@ class Settings(BaseSettings):
     @classmethod
     def _reject_placeholder(cls, v: SecretStr) -> SecretStr:
         if v.get_secret_value().startswith("change-me"):
-            raise ValueError("remplacez la valeur d'exemple (openssl rand -hex 32)")
+            raise ValueError("replace the example value (openssl rand -hex 32)")
         return v
 
     @field_validator("ytdlp_cookies_file", "temp_dir", mode="before")

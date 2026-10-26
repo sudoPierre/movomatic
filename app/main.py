@@ -1,4 +1,4 @@
-"""Point d'entrée FastAPI : routes /movomatic et /health."""
+"""FastAPI entry point: /movomatic and /health routes."""
 
 import asyncio
 import logging
@@ -54,7 +54,7 @@ async def lifespan(app: FastAPI):
         jellyseerr=jellyseerr,
         semaphore=asyncio.Semaphore(settings.max_concurrent_jobs),
     )
-    logger.info("Movomatic %s démarré (modèle %s)", __version__, settings.gemini_model)
+    logger.info("Movomatic %s started (model %s)", __version__, settings.gemini_model)
     try:
         yield
     finally:
@@ -70,7 +70,7 @@ app = FastAPI(
 
 
 # --------------------------------------------------------------------------- #
-# Dépendances
+# Dependencies
 # --------------------------------------------------------------------------- #
 def get_services(request: Request) -> Services:
     return request.app.state.services
@@ -82,11 +82,11 @@ def require_api_key(
 ) -> None:
     expected = services.settings.movomatic_api_key.get_secret_value()
     if not x_api_key or not secrets.compare_digest(x_api_key.encode(), expected.encode()):
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "clé API invalide ou absente")
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "invalid or missing API key")
 
 
 # --------------------------------------------------------------------------- #
-# Gestion des erreurs
+# Error handling
 # --------------------------------------------------------------------------- #
 @app.exception_handler(HTTPException)
 async def _http_error(_: Request, exc: HTTPException) -> JSONResponse:
@@ -97,9 +97,9 @@ async def _http_error(_: Request, exc: HTTPException) -> JSONResponse:
 
 @app.exception_handler(ExtractionError)
 async def _extraction_error(_: Request, exc: ExtractionError) -> JSONResponse:
-    logger.warning("Extraction impossible : %s", exc)
+    logger.warning("Extraction failed: %s", exc)
     return JSONResponse(
-        ErrorResponse(message=f"❌ Reel illisible : {exc}").model_dump(),
+        ErrorResponse(message=f"❌ Could not read the Reel: {exc}").model_dump(),
         status_code=422,
     )
 
@@ -107,7 +107,7 @@ async def _extraction_error(_: Request, exc: ExtractionError) -> JSONResponse:
 @app.exception_handler(AnalysisError)
 @app.exception_handler(JellyseerrError)
 async def _upstream_error(_: Request, exc: Exception) -> JSONResponse:
-    logger.error("Erreur amont : %s", exc)
+    logger.error("Upstream error: %s", exc)
     return JSONResponse(
         ErrorResponse(message=f"❌ {exc}").model_dump(), status_code=status.HTTP_502_BAD_GATEWAY
     )
@@ -149,10 +149,10 @@ def _is_confident(ident: Optional[MediaIdentification], settings: Settings) -> b
 
 
 async def identify(url: str, services: Services) -> tuple[Optional[MediaIdentification], Optional[str]]:
-    """Identifie l'œuvre : d'abord sur le texte du Reel, puis sur la vidéo si nécessaire."""
+    """Identify the work: from the Reel text first, then from the video if needed."""
     settings = services.settings
     meta = await services.extractor.extract_metadata(url)
-    logger.info("Reel %s par %s", meta.id, meta.uploader)
+    logger.info("Reel %s by %s", meta.id, meta.uploader)
 
     ident: Optional[MediaIdentification] = None
     source: Optional[str] = None
@@ -162,12 +162,12 @@ async def identify(url: str, services: Services) -> tuple[Optional[MediaIdentifi
     if _is_confident(ident, settings) or not settings.gemini_video_fallback:
         return ident, source
 
-    logger.info("Confiance insuffisante sur le texte : analyse de la vidéo")
+    logger.info("Low confidence from text: analysing the video")
     with tempfile.TemporaryDirectory(prefix="movomatic-", dir=settings.temp_dir) as tmp:
         try:
             video = await services.extractor.download_video(url, Path(tmp))
         except ExtractionError as exc:
-            logger.warning("Téléchargement vidéo impossible : %s", exc)
+            logger.warning("Video download failed: %s", exc)
             return ident, source
         video_ident = await services.analyzer.analyze_video(video, meta)
 
@@ -183,7 +183,7 @@ async def process_reel(body: MovomaticRequest, services: Services) -> MovomaticR
     if not _is_confident(ident, settings):
         return MovomaticResponse(
             status=Status.NOT_IDENTIFIED,
-            message="🤷 Impossible d'identifier l'œuvre de ce Reel.",
+            message="🤷 Could not identify the title in this Reel.",
             source=source,
             identification=ident,
         )
@@ -194,7 +194,7 @@ async def process_reel(body: MovomaticRequest, services: Services) -> MovomaticR
         label = f"{ident.title} ({ident.year})" if ident.year else ident.title
         return MovomaticResponse(
             status=Status.NOT_FOUND,
-            message=f"🔎 « {label} » introuvable sur TMDB.",
+            message=f"🔎 \"{label}\" not found on TMDB.",
             source=source,
             identification=ident,
         )
@@ -204,21 +204,21 @@ async def process_reel(body: MovomaticRequest, services: Services) -> MovomaticR
     common = {"source": source, "identification": ident, "media": media}
 
     if match.is_available:
-        return MovomaticResponse(status=Status.ALREADY_AVAILABLE, message=f"📺 {label} est déjà disponible.", **common)
+        return MovomaticResponse(status=Status.ALREADY_AVAILABLE, message=f"📺 {label} is already available.", **common)
     if match.is_pending:
-        return MovomaticResponse(status=Status.ALREADY_REQUESTED, message=f"⏳ {label} est déjà demandé.", **common)
+        return MovomaticResponse(status=Status.ALREADY_REQUESTED, message=f"⏳ {label} has already been requested.", **common)
     if body.dry_run:
-        return MovomaticResponse(status=Status.IDENTIFIED, message=f"🎯 {label} identifié (dry run).", **common)
+        return MovomaticResponse(status=Status.IDENTIFIED, message=f"🎯 {label} identified (dry run).", **common)
 
     try:
         request_id = await services.jellyseerr.request_media(match)
     except AlreadyRequestedError:
-        return MovomaticResponse(status=Status.ALREADY_REQUESTED, message=f"⏳ {label} est déjà demandé.", **common)
+        return MovomaticResponse(status=Status.ALREADY_REQUESTED, message=f"⏳ {label} has already been requested.", **common)
 
-    kind = "Anime" if media.is_anime else ("Film" if media.media_type == "movie" else "Série")
+    kind = "Anime" if media.is_anime else ("Movie" if media.media_type == "movie" else "Series")
     return MovomaticResponse(
         status=Status.REQUESTED,
-        message=f"✅ {kind} demandé : {label}",
+        message=f"✅ {kind} requested: {label}",
         request_id=request_id,
         **common,
     )
@@ -236,7 +236,7 @@ def _media_result(match: SearchMatch) -> MediaResult:
 
 
 def run() -> None:
-    """Lance le serveur (utilisé par systemd et la commande `movomatic`)."""
+    """Run the server (used by systemd and the `movomatic` command)."""
     import uvicorn
 
     settings = get_settings()

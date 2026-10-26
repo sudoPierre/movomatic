@@ -1,4 +1,4 @@
-"""Client minimal de l'API Jellyseerr : recherche TMDB, détection d'anime et création de requêtes."""
+"""Minimal Jellyseerr API client: TMDB search, anime detection and request creation."""
 
 import logging
 import re
@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 TMDB_POSTER_BASE = "https://image.tmdb.org/t/p/w500"
 TMDB_GENRE_ANIMATION = 16
 
-# Statuts de MediaInfo côté Jellyseerr.
+# Jellyseerr MediaInfo statuses.
 MEDIA_STATUS_PENDING = 2
 MEDIA_STATUS_PROCESSING = 3
 MEDIA_STATUS_PARTIALLY_AVAILABLE = 4
@@ -25,11 +25,11 @@ MEDIA_STATUS_AVAILABLE = 5
 
 
 class JellyseerrError(RuntimeError):
-    """Erreur de communication avec Jellyseerr."""
+    """Error while talking to Jellyseerr."""
 
 
 class AlreadyRequestedError(JellyseerrError):
-    """Jellyseerr indique que la requête existe déjà."""
+    """Jellyseerr reports that the request already exists."""
 
 
 @dataclass(frozen=True)
@@ -78,14 +78,14 @@ class JellyseerrClient:
         try:
             resp = await self._http.request(method, path, **kwargs)
         except httpx.HTTPError as exc:
-            raise JellyseerrError(f"Jellyseerr injoignable : {exc.__class__.__name__}") from exc
+            raise JellyseerrError(f"Jellyseerr unreachable: {exc.__class__.__name__}") from exc
 
         if resp.status_code == 409:
             raise AlreadyRequestedError(_error_message(resp))
         if resp.status_code in (401, 403):
-            raise JellyseerrError("clé API Jellyseerr refusée")
+            raise JellyseerrError("Jellyseerr API key rejected")
         if resp.status_code >= 400:
-            raise JellyseerrError(f"Jellyseerr HTTP {resp.status_code} : {_error_message(resp)}")
+            raise JellyseerrError(f"Jellyseerr HTTP {resp.status_code}: {_error_message(resp)}")
         return resp.json() if resp.content else None
 
     async def ping(self) -> bool:
@@ -96,11 +96,11 @@ class JellyseerrClient:
             return False
 
     # ------------------------------------------------------------------ #
-    # Recherche
+    # Search
     # ------------------------------------------------------------------ #
     async def search(self, query: str) -> list[dict[str, Any]]:
-        # Jellyseerr exige un encodage strict (RFC 3986) : les espaces doivent être
-        # %20 et les caractères !'()* encodés, sinon il répond 400.
+        # Jellyseerr requires strict RFC 3986 encoding: spaces must be %20 and
+        # !'()* must be escaped, otherwise it answers 400.
         path = f"/api/v1/search?query={quote(query, safe='')}&page=1&language=en"
         data = await self._request("GET", path)
         return [r for r in (data or {}).get("results", []) if r.get("mediaType") in ("movie", "tv")]
@@ -117,7 +117,7 @@ class JellyseerrClient:
                 score = _score(result, ident, rank)
                 if best is None or score > best[0]:
                     best = (score, result)
-            # Correspondance quasi certaine : inutile d'interroger le titre original.
+            # Near-certain match: no need to query the original title.
             if best and best[0] >= 8:
                 break
 
@@ -126,7 +126,7 @@ class JellyseerrClient:
         return _to_match(best[1], ident, self._settings.jellyseerr_request_4k)
 
     # ------------------------------------------------------------------ #
-    # Requête
+    # Request
     # ------------------------------------------------------------------ #
     async def request_media(self, match: SearchMatch) -> Optional[int]:
         s = self._settings
@@ -149,7 +149,7 @@ class JellyseerrClient:
             }
             body.update({k: v for k, v in overrides.items() if v is not None})
 
-        logger.info("Requête Jellyseerr : %s", body)
+        logger.info("Jellyseerr request: %s", body)
         data = await self._request("POST", "/api/v1/request", json=body)
         return (data or {}).get("id")
 
@@ -193,7 +193,7 @@ def _score(result: dict[str, Any], ident: MediaIdentification, rank: int) -> flo
     elif any(w in c or c in w for w in wanted for c in candidates):
         score += 2
     else:
-        return -10.0  # aucun recoupement de titre : jamais retenu
+        return -10.0  # no title overlap: never selected
 
     if ident.media_type and result.get("mediaType") == ident.media_type:
         score += 2
@@ -210,7 +210,7 @@ def _score(result: dict[str, Any], ident: MediaIdentification, rank: int) -> flo
     if ident.is_anime and is_anime_result(result):
         score += 1
 
-    # TMDB trie déjà par pertinence/popularité : léger bonus aux premiers résultats.
+    # TMDB already sorts by relevance/popularity: small bonus for top results.
     score += max(0.0, 1.0 - rank * 0.2)
     return score
 

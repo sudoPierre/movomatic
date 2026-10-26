@@ -17,15 +17,15 @@ Restart=on-failure
 RestartSec=5
 TimeoutStopSec=30
 
-# Répertoires gérés par systemd (créés avec les bons droits) :
-#   /var/lib/movomatic   -> cookies Instagram (cookies.txt)
-#   /var/cache/movomatic -> cache yt-dlp
+# Directories managed by systemd (created with the right ownership):
+#   /var/lib/movomatic   -> Instagram cookies (cookies.txt)
+#   /var/cache/movomatic -> yt-dlp cache
 StateDirectory=movomatic
 CacheDirectory=movomatic
 PrivateTmp=true
 
-# Durcissement. Si le service échoue avec "226/NAMESPACE" dans un LXC non privilégié,
-# activez l'option "nesting" du conteneur ou commentez les lignes Protect*/Private*.
+# Hardening. If the service fails with "226/NAMESPACE" in an unprivileged LXC,
+# enable the container's "nesting" feature or comment out the Protect*/Private* lines.
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
