@@ -23,8 +23,8 @@ dependencies = [
     "pydantic-settings==2.16.1",
     "google-genai==2.33.0",
     "httpx==0.28.1",
-    # Instagram changes often: update with `deploy/install_lxc.sh --update`.
-    "yt-dlp==2026.10.21",
+    # Minimum only: Instagram changes often and `install_lxc.sh --update` installs the latest yt-dlp.
+    "yt-dlp>=2026.10.21",
 ]
 
 [project.optional-dependencies]
