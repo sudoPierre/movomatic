@@ -16,14 +16,22 @@ from app import __version__
 from app.analyzer import AnalysisError, GeminiAnalyzer
 from app.config import Settings, get_settings
 from app.extractor import ExtractionError, ReelExtractor
-from app.jellyseerr import AlreadyRequestedError, JellyseerrClient, JellyseerrError, SearchMatch
+from app.jellyseerr import (
+    AlreadyRequestedError,
+    JellyseerrClient,
+    JellyseerrError,
+    SearchMatch,
+    normalize_title,
+)
 from app.models import (
     ErrorResponse,
     HealthResponse,
+    ItemResult,
     MediaIdentification,
     MediaResult,
     MovomaticRequest,
     MovomaticResponse,
+    ReelAnalysis,
     Status,
 )
 
@@ -139,89 +147,160 @@ async def movomatic(
 # --------------------------------------------------------------------------- #
 # Orchestration
 # --------------------------------------------------------------------------- #
-def _is_confident(ident: Optional[MediaIdentification], settings: Settings) -> bool:
-    return bool(
-        ident
-        and ident.identified
-        and ident.title
-        and ident.confidence >= settings.gemini_min_confidence
+def _confident_items(analysis: Optional[ReelAnalysis], settings: Settings) -> list[MediaIdentification]:
+    """Items above the confidence threshold, deduplicated, capped to the configured limit."""
+    best: dict[tuple[str, Optional[int]], MediaIdentification] = {}
+    for item in analysis.items if analysis else []:
+        key = (normalize_title(item.title), item.year)
+        if not key[0] or item.confidence < settings.gemini_min_confidence:
+            continue
+        if key not in best or item.confidence > best[key].confidence:
+            best[key] = item
+    return list(best.values())[: settings.max_titles_per_reel]
+
+
+def _merge(first: Optional[ReelAnalysis], second: ReelAnalysis) -> ReelAnalysis:
+    return ReelAnalysis(
+        works_featured=max(first.works_featured if first else 0, second.works_featured),
+        items=[*(first.items if first else []), *second.items],
     )
 
 
-async def identify(url: str, services: Services) -> tuple[Optional[MediaIdentification], Optional[str]]:
-    """Identify the work: from the Reel text first, then from the video if needed."""
+async def identify(url: str, services: Services) -> tuple[Optional[ReelAnalysis], Optional[str]]:
+    """Identify the works: from the Reel text first, then from the video if some are missing."""
     settings = services.settings
     meta = await services.extractor.extract_metadata(url)
     logger.info("Reel %s by %s", meta.id, meta.uploader)
 
-    ident: Optional[MediaIdentification] = None
+    analysis: Optional[ReelAnalysis] = None
     source: Optional[str] = None
     if meta.description or meta.title or meta.tags:
-        ident = await services.analyzer.analyze_metadata(meta)
+        analysis = await services.analyzer.analyze_metadata(meta)
         source = "metadata"
-    if _is_confident(ident, settings) or not settings.gemini_video_fallback:
-        return ident, source
 
-    logger.info("Low confidence from text: analysing the video")
+    found = len(_confident_items(analysis, settings))
+    featured = analysis.works_featured if analysis else 0
+    if not settings.gemini_video_fallback or (found and found >= featured):
+        return analysis, source
+
+    logger.info("Text identified %d of %d work(s): analysing the video", found, featured)
     with tempfile.TemporaryDirectory(prefix="movomatic-", dir=settings.temp_dir) as tmp:
         try:
             video = await services.extractor.download_video(url, Path(tmp))
         except ExtractionError as exc:
             logger.warning("Video download failed: %s", exc)
-            return ident, source
-        video_ident = await services.analyzer.analyze_video(video, meta)
-
-    if ident is None or video_ident.confidence >= ident.confidence:
-        return video_ident, "video"
-    return ident, source
+            return analysis, source
+        video_analysis = await services.analyzer.analyze_video(video, meta)
+    return _merge(analysis, video_analysis), "video"
 
 
 async def process_reel(body: MovomaticRequest, services: Services) -> MovomaticResponse:
     settings = services.settings
-    ident, source = await identify(body.url, services)
+    analysis, source = await identify(body.url, services)
+    items = _confident_items(analysis, settings)
+    featured = max(analysis.works_featured if analysis else 0, len(items))
 
-    if not _is_confident(ident, settings):
+    if not items:
         return MovomaticResponse(
             status=Status.NOT_IDENTIFIED,
-            message="🤷 Could not identify the title in this Reel.",
+            message="🤷 Could not identify any title in this Reel.",
             source=source,
-            identification=ident,
+            works_featured=featured,
         )
-    assert ident is not None
 
-    match = await services.jellyseerr.find_best_match(ident)
+    matches = await asyncio.gather(
+        *(services.jellyseerr.find_best_match(item) for item in items), return_exceptions=True
+    )
+    results: list[ItemResult] = []
+    seen: set[int] = set()
+    for item, match in zip(items, matches):
+        if isinstance(match, SearchMatch):
+            if match.tmdb_id in seen:  # two Gemini titles resolved to the same TMDB entry
+                continue
+            seen.add(match.tmdb_id)
+        results.append(await _handle_item(item, match, body.dry_run, services))
+
+    errors = [r for r in results if r.status == Status.ERROR]
+    if len(errors) == len(results):
+        raise JellyseerrError(errors[0].message.removeprefix("❌ "))
+
+    unidentified = featured - len(items)
+    return MovomaticResponse(
+        status=min((r.status for r in results), key=_STATUS_ORDER.index),
+        message=_summary(results, unidentified),
+        source=source,
+        works_featured=featured,
+        results=results,
+    )
+
+
+async def _handle_item(
+    item: MediaIdentification,
+    match: "SearchMatch | None | BaseException",
+    dry_run: bool,
+    services: Services,
+) -> ItemResult:
+    if isinstance(match, BaseException):
+        if not isinstance(match, JellyseerrError):
+            raise match
+        return ItemResult(status=Status.ERROR, message=f"❌ {item.label}: {match}", identification=item)
     if match is None:
-        label = f"{ident.title} ({ident.year})" if ident.year else ident.title
-        return MovomaticResponse(
-            status=Status.NOT_FOUND,
-            message=f"🔎 \"{label}\" not found on TMDB.",
-            source=source,
-            identification=ident,
-        )
+        return ItemResult(status=Status.NOT_FOUND, message=f"🔎 {item.label}: not found on TMDB",
+                          identification=item)
 
     media = _media_result(match)
     label = f"{media.title} ({media.year})" if media.year else media.title
-    common = {"source": source, "identification": ident, "media": media}
+    common = {"identification": item, "media": media}
 
     if match.is_available:
-        return MovomaticResponse(status=Status.ALREADY_AVAILABLE, message=f"📺 {label} is already available.", **common)
+        return ItemResult(status=Status.ALREADY_AVAILABLE, message=f"📺 {label}: already available", **common)
     if match.is_pending:
-        return MovomaticResponse(status=Status.ALREADY_REQUESTED, message=f"⏳ {label} has already been requested.", **common)
-    if body.dry_run:
-        return MovomaticResponse(status=Status.IDENTIFIED, message=f"🎯 {label} identified (dry run).", **common)
+        return ItemResult(status=Status.ALREADY_REQUESTED, message=f"⏳ {label}: already requested", **common)
+    if dry_run:
+        return ItemResult(status=Status.IDENTIFIED, message=f"🎯 {label}: identified (dry run)", **common)
 
     try:
         request_id = await services.jellyseerr.request_media(match)
     except AlreadyRequestedError:
-        return MovomaticResponse(status=Status.ALREADY_REQUESTED, message=f"⏳ {label} has already been requested.", **common)
+        return ItemResult(status=Status.ALREADY_REQUESTED, message=f"⏳ {label}: already requested", **common)
+    except JellyseerrError as exc:
+        return ItemResult(status=Status.ERROR, message=f"❌ {label}: {exc}", **common)
 
     kind = "Anime" if media.is_anime else ("Movie" if media.media_type == "movie" else "Series")
-    return MovomaticResponse(
-        status=Status.REQUESTED,
-        message=f"✅ {kind} requested: {label}",
-        request_id=request_id,
-        **common,
-    )
+    return ItemResult(status=Status.REQUESTED, message=f"✅ {kind} requested: {label}",
+                      request_id=request_id, **common)
+
+
+# Order used to pick the overall status: the most "useful" outcome wins.
+_STATUS_ORDER = [
+    Status.REQUESTED, Status.IDENTIFIED, Status.ALREADY_REQUESTED,
+    Status.ALREADY_AVAILABLE, Status.NOT_FOUND, Status.ERROR, Status.NOT_IDENTIFIED,
+]
+
+_SUMMARY_LABELS = {
+    Status.REQUESTED: "requested",
+    Status.IDENTIFIED: "identified",
+    Status.ALREADY_REQUESTED: "already requested",
+    Status.ALREADY_AVAILABLE: "already available",
+    Status.NOT_FOUND: "not found",
+    Status.ERROR: "failed",
+}
+
+
+def _summary(results: list[ItemResult], unidentified: int) -> str:
+    """One line for a single title, otherwise a header plus one line per title."""
+    if len(results) == 1 and unidentified <= 0:
+        return results[0].message
+    counts = [
+        f"{sum(r.status == status for r in results)} {label}"
+        for status, label in _SUMMARY_LABELS.items()
+        if any(r.status == status for r in results)
+    ]
+    lines = [f"🎬 {len(results)} titles: " + ", ".join(counts)]
+    lines += [r.message for r in results]
+    if unidentified > 0:
+        lines.append(f"🤷 {unidentified} more could not be identified")
+    return "\n".join(lines)
 
 
 def _media_result(match: SearchMatch) -> MediaResult:

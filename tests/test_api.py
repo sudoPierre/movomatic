@@ -1,6 +1,7 @@
 """Movomatic API tests: yt-dlp and Gemini are mocked, Jellyseerr is simulated with respx."""
 
 import asyncio
+import json
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
@@ -13,7 +14,7 @@ from app.config import Settings
 from app.extractor import ExtractionError
 from app.jellyseerr import JellyseerrClient
 from app.main import Services, app
-from app.models import MediaIdentification, MovomaticRequest, ReelMetadata
+from app.models import MediaIdentification, MovomaticRequest, ReelAnalysis, ReelMetadata
 
 API_KEY = "test-api-key-0123456789"
 JELLYSEERR = "http://jellyseerr.test:5055"
@@ -38,6 +39,15 @@ FRIEREN_RESULT = {
     "genreIds": [16, 10759, 10765],
     "originalLanguage": "ja",
 }
+ALIEN_RESULT = {
+    "id": 348,
+    "mediaType": "movie",
+    "title": "Alien",
+    "originalTitle": "Alien",
+    "releaseDate": "1979-05-25",
+    "genreIds": [27, 878],
+    "originalLanguage": "en",
+}
 
 
 def make_settings(**overrides) -> Settings:
@@ -52,9 +62,16 @@ def make_settings(**overrides) -> Settings:
 
 
 def ident(**kw) -> MediaIdentification:
-    base = {"identified": True, "title": "Dune: Part Two", "year": 2024,
-            "media_type": "movie", "is_anime": False, "confidence": 0.95, "reasoning": "title in the caption"}
+    base = {"title": "Dune: Part Two", "year": 2024, "media_type": "movie",
+            "is_anime": False, "confidence": 0.95, "reasoning": "title in the caption"}
     return MediaIdentification(**{**base, **kw})
+
+
+def analysis(*items: MediaIdentification, featured: int | None = None) -> ReelAnalysis:
+    return ReelAnalysis(works_featured=len(items) if featured is None else featured, items=list(items))
+
+
+NOTHING = analysis(featured=0)
 
 
 @pytest.fixture
@@ -63,10 +80,17 @@ def jellyseerr_mock():
         yield mock
 
 
+def search_by_title(jellyseerr_mock, mapping: dict[str, list[dict]]):
+    """Answer /search with the results registered for the queried title."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"results": mapping.get(request.url.params["query"], [])})
+
+    return jellyseerr_mock.get("/api/v1/search").mock(side_effect=handler)
+
+
 @pytest.fixture
 def make_client(jellyseerr_mock):
-    created: list[Services] = []
-
     def _make(settings: Settings | None = None, text=None, video=None, meta=None):
         settings = settings or make_settings()
         extractor = MagicMock()
@@ -75,8 +99,8 @@ def make_client(jellyseerr_mock):
         )
         extractor.download_video = AsyncMock(return_value=Path("/tmp/fake.mp4"))
         analyzer = MagicMock()
-        analyzer.analyze_metadata = AsyncMock(return_value=text if text is not None else ident())
-        analyzer.analyze_video = AsyncMock(return_value=video)
+        analyzer.analyze_metadata = AsyncMock(return_value=text if text is not None else analysis(ident()))
+        analyzer.analyze_video = AsyncMock(return_value=video if video is not None else NOTHING)
         services = Services(
             settings=settings,
             extractor=extractor,
@@ -85,7 +109,6 @@ def make_client(jellyseerr_mock):
             semaphore=asyncio.Semaphore(1),
         )
         app.state.services = services
-        created.append(services)
         # Without `with`, TestClient skips the lifespan, so our mocked services stay in place.
         return TestClient(app), services
 
@@ -94,6 +117,10 @@ def make_client(jellyseerr_mock):
 
 def post(client: TestClient, url: str = REEL, key: str = API_KEY, **extra):
     return client.post("/movomatic", json={"url": url, **extra}, headers={"X-API-Key": key})
+
+
+def sent_bodies(route) -> list[dict]:
+    return [json.loads(call.request.content) for call in route.calls]
 
 
 # --------------------------------------------------------------------------- #
@@ -133,7 +160,7 @@ def test_url_normalization(raw):
 
 
 # --------------------------------------------------------------------------- #
-# Full pipeline
+# Single title
 # --------------------------------------------------------------------------- #
 def test_movie_is_requested(make_client, jellyseerr_mock):
     client, services = make_client()
@@ -145,16 +172,16 @@ def test_movie_is_requested(make_client, jellyseerr_mock):
     assert resp.status_code == 200, resp.text
     data = resp.json()
     assert data["status"] == "requested"
-    assert data["request_id"] == 42
     assert data["source"] == "metadata"
-    assert data["media"]["tmdb_id"] == 693134
-    assert data["media"]["poster_url"] == "https://image.tmdb.org/t/p/w500/poster.jpg"
+    assert data["message"] == "✅ Movie requested: Dune: Part Two (2024)"
+    [item] = data["results"]
+    assert item["request_id"] == 42
+    assert item["media"]["tmdb_id"] == 693134
+    assert item["media"]["poster_url"] == "https://image.tmdb.org/t/p/w500/poster.jpg"
     # Strict encoding required by Jellyseerr.
     assert "query=Dune%3A%20Part%20Two" in str(search.calls.last.request.url)
     assert request.calls.last.request.headers["X-Api-Key"] == "fake-jellyseerr-key"
-    assert httpx.Response(200, content=request.calls.last.request.content).json() == {
-        "mediaType": "movie", "mediaId": 693134, "is4k": False,
-    }
+    assert sent_bodies(request) == [{"mediaType": "movie", "mediaId": 693134, "is4k": False}]
     services.analyzer.analyze_video.assert_not_called()
 
 
@@ -163,23 +190,21 @@ def test_anime_series_uses_overrides(make_client, jellyseerr_mock):
                              anime_sonarr_root_folder="/media/anime")
     frieren = ident(title="Frieren: Beyond Journey's End", original_title="Sousou no Frieren",
                     year=2023, media_type="tv", is_anime=True)
-    client, _ = make_client(settings=settings, text=frieren)
+    client, _ = make_client(settings=settings, text=analysis(frieren))
     jellyseerr_mock.get("/api/v1/search").respond(json={"results": [FRIEREN_RESULT]})
     request = jellyseerr_mock.post("/api/v1/request").respond(201, json={"id": 7})
 
     data = post(client).json()
 
     assert data["status"] == "requested"
-    assert data["media"]["is_anime"] is True
+    assert data["results"][0]["media"]["is_anime"] is True
     assert data["message"].startswith("✅ Anime")
-    sent = httpx.Response(200, content=request.calls.last.request.content).json()
-    assert sent == {"mediaType": "tv", "mediaId": 209867, "is4k": False, "seasons": "all",
-                    "serverId": 1, "profileId": 7, "rootFolder": "/media/anime"}
+    assert sent_bodies(request) == [{"mediaType": "tv", "mediaId": 209867, "is4k": False, "seasons": "all",
+                                     "serverId": 1, "profileId": 7, "rootFolder": "/media/anime"}]
 
 
-def test_video_fallback_when_text_is_unsure(make_client, jellyseerr_mock):
-    unsure = MediaIdentification(identified=False, is_anime=False, confidence=0.1)
-    client, services = make_client(text=unsure, video=ident(confidence=0.9))
+def test_video_fallback_when_text_finds_nothing(make_client, jellyseerr_mock):
+    client, services = make_client(text=analysis(featured=1), video=analysis(ident(confidence=0.9)))
     jellyseerr_mock.get("/api/v1/search").respond(json={"results": [DUNE_RESULT]})
     jellyseerr_mock.post("/api/v1/request").respond(201, json={"id": 1})
 
@@ -191,11 +216,11 @@ def test_video_fallback_when_text_is_unsure(make_client, jellyseerr_mock):
     services.analyzer.analyze_video.assert_awaited_once()
 
 
-def test_not_identified(make_client, jellyseerr_mock):
-    unsure = MediaIdentification(identified=False, is_anime=False, confidence=0.2)
-    client, _ = make_client(text=unsure, video=unsure)
+def test_low_confidence_items_are_ignored(make_client, jellyseerr_mock):
+    client, _ = make_client(text=analysis(ident(confidence=0.3)), video=analysis(ident(confidence=0.4)))
     data = post(client).json()
     assert data["status"] == "not_identified"
+    assert data["results"] == []
     assert not jellyseerr_mock.calls
 
 
@@ -233,13 +258,97 @@ def test_dry_run_does_not_request(make_client, jellyseerr_mock):
 
 
 def test_best_match_prefers_year_and_type(make_client, jellyseerr_mock):
-    client, _ = make_client(text=ident(title="Dune", year=2021))
+    client, _ = make_client(text=analysis(ident(title="Dune", year=2021)))
     old = {**DUNE_RESULT, "id": 841, "title": "Dune", "originalTitle": "Dune", "releaseDate": "1984-12-14"}
     new = {**DUNE_RESULT, "id": 438631, "title": "Dune", "originalTitle": "Dune", "releaseDate": "2021-09-15"}
     series = {**FRIEREN_RESULT, "id": 1, "name": "Dune", "originalName": "Dune", "firstAirDate": "2000-12-03"}
     jellyseerr_mock.get("/api/v1/search").respond(json={"results": [old, series, new]})
     jellyseerr_mock.post("/api/v1/request").respond(201, json={"id": 3})
-    assert post(client).json()["media"]["tmdb_id"] == 438631
+    assert post(client).json()["results"][0]["media"]["tmdb_id"] == 438631
+
+
+# --------------------------------------------------------------------------- #
+# Several titles in one Reel
+# --------------------------------------------------------------------------- #
+def test_every_title_is_requested(make_client, jellyseerr_mock):
+    alien = ident(title="Alien", year=1979)
+    frieren = ident(title="Frieren: Beyond Journey's End", year=2023, media_type="tv", is_anime=True)
+    client, services = make_client(text=analysis(ident(), alien, frieren))
+    search_by_title(jellyseerr_mock, {
+        "Dune: Part Two": [DUNE_RESULT],
+        "Alien": [{**ALIEN_RESULT, "mediaInfo": {"status": 5}}],
+        "Frieren: Beyond Journey's End": [FRIEREN_RESULT],
+    })
+    request = jellyseerr_mock.post("/api/v1/request").respond(201, json={"id": 9})
+
+    data = post(client).json()
+
+    assert data["status"] == "requested"
+    assert data["works_featured"] == 3
+    assert [r["status"] for r in data["results"]] == ["requested", "already_available", "requested"]
+    assert {b["mediaId"] for b in sent_bodies(request)} == {693134, 209867}
+    assert data["message"].splitlines() == [
+        "🎬 3 titles: 2 requested, 1 already available",
+        "✅ Movie requested: Dune: Part Two (2024)",
+        "📺 Alien (1979): already available",
+        "✅ Anime requested: Frieren: Beyond Journey's End (2023)",
+    ]
+    services.analyzer.analyze_video.assert_not_called()
+
+
+def test_video_completes_a_partial_caption(make_client, jellyseerr_mock):
+    # The caption names 1 of 3 works: the video finds the others, duplicates are merged.
+    client, services = make_client(
+        text=analysis(ident(), featured=3),
+        video=analysis(ident(confidence=0.99), ident(title="Alien", year=1979), featured=3),
+    )
+    search_by_title(jellyseerr_mock, {"Dune: Part Two": [DUNE_RESULT], "Alien": [ALIEN_RESULT]})
+    request = jellyseerr_mock.post("/api/v1/request").respond(201, json={"id": 1})
+
+    data = post(client).json()
+
+    services.analyzer.analyze_video.assert_awaited_once()
+    assert data["source"] == "video"
+    assert [r["media"]["tmdb_id"] for r in data["results"]] == [693134, 348]
+    assert len(request.calls) == 2
+    assert data["message"].splitlines()[-1] == "🤷 1 more could not be identified"
+
+
+def test_titles_resolving_to_same_tmdb_entry_are_requested_once(make_client, jellyseerr_mock):
+    client, _ = make_client(text=analysis(ident(), ident(title="Dune Part Two", year=None)))
+    jellyseerr_mock.get("/api/v1/search").respond(json={"results": [DUNE_RESULT]})
+    request = jellyseerr_mock.post("/api/v1/request").respond(201, json={"id": 1})
+
+    data = post(client).json()
+
+    assert len(data["results"]) == 1
+    assert len(request.calls) == 1
+
+
+def test_titles_are_capped(make_client, jellyseerr_mock):
+    items = [ident(title=f"Movie {i}", year=2000 + i) for i in range(5)]
+    client, _ = make_client(settings=make_settings(max_titles_per_reel=2), text=analysis(*items))
+    search = jellyseerr_mock.get("/api/v1/search").respond(json={"results": []})
+    post(client)
+    assert len(search.calls) == 2
+
+
+def test_one_failing_title_does_not_block_the_others(make_client, jellyseerr_mock):
+    client, _ = make_client(text=analysis(ident(), ident(title="Alien", year=1979)))
+    search_by_title(jellyseerr_mock, {"Dune: Part Two": [DUNE_RESULT], "Alien": [ALIEN_RESULT]})
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if json.loads(request.content)["mediaId"] == 348:
+            return httpx.Response(500, json={"message": "Radarr is down"})
+        return httpx.Response(201, json={"id": 5})
+
+    jellyseerr_mock.post("/api/v1/request").mock(side_effect=handler)
+
+    data = post(client).json()
+
+    assert data["status"] == "requested"
+    assert [r["status"] for r in data["results"]] == ["requested", "error"]
+    assert "Radarr is down" in data["results"][1]["message"]
 
 
 # --------------------------------------------------------------------------- #
@@ -276,17 +385,32 @@ def _gemini(side_effect):
     return client
 
 
+@pytest.fixture(autouse=True)
+def no_backoff(monkeypatch):
+    monkeypatch.setattr("app.analyzer.RETRY_BACKOFF_SECONDS", 0)
+
+
 async def test_gemini_falls_back_to_next_model():
     from app.analyzer import GeminiAnalyzer
 
-    ok = MagicMock(parsed=ident())
-    client = _gemini([_api_error(503), _api_error(404), ok])
+    ok = MagicMock(parsed=analysis(ident()))
+    # "a" stays overloaded (3 attempts), "b" is retired (no retry), "c" answers.
+    client = _gemini([_api_error(503)] * 3 + [_api_error(404), ok])
     settings = make_settings(gemini_model="a", gemini_fallback_models="b, c,a")
     result = await GeminiAnalyzer(settings, client=client).analyze_metadata(ReelMetadata(url=REEL))
 
-    assert result.title == "Dune: Part Two"
+    assert result.items[0].title == "Dune: Part Two"
     models = [c.kwargs["model"] for c in client.aio.models.generate_content.await_args_list]
-    assert models == ["a", "b", "c"]
+    assert models == ["a", "a", "a", "b", "c"]
+
+
+async def test_gemini_retries_same_model_on_short_overload():
+    from app.analyzer import GeminiAnalyzer
+
+    client = _gemini([_api_error(503), MagicMock(parsed=analysis(ident()))])
+    await GeminiAnalyzer(make_settings(gemini_model="a"), client=client).analyze_metadata(ReelMetadata(url=REEL))
+    models = [c.kwargs["model"] for c in client.aio.models.generate_content.await_args_list]
+    assert models == ["a", "a"]
 
 
 async def test_gemini_does_not_retry_auth_errors():
@@ -301,6 +425,6 @@ async def test_gemini_does_not_retry_auth_errors():
 async def test_gemini_all_models_unavailable():
     from app.analyzer import AnalysisError, GeminiAnalyzer
 
-    client = _gemini([_api_error(429), _api_error(503), _api_error(504)])
+    client = _gemini([_api_error(503)] * 9)
     with pytest.raises(AnalysisError, match="Gemini unavailable"):
         await GeminiAnalyzer(make_settings(), client=client).analyze_metadata(ReelMetadata(url=REEL))

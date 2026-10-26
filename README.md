@@ -1,13 +1,13 @@
 # 🎬 Movomatic
 
-**Share an Instagram Reel from your iPhone ➜ the movie, series or anime is requested on Jellyseerr automatically.**
+**Share an Instagram Reel from your iPhone ➜ every movie, series or anime it features is requested on Jellyseerr automatically.**
 
 Movomatic is a lightweight FastAPI microservice. It:
 
 1. receives an Instagram Reel URL sent by an **iOS Shortcut** from the share sheet;
 2. extracts the caption, hashtags and author with **yt-dlp**;
-3. asks **Google Gemini (Flash)** to identify the title. If the caption is not enough, Gemini analyses **the video itself** (frames, on-screen text and audio);
-4. looks the title up on TMDB through **Jellyseerr**, detects **anime**, and sends the request, which Jellyseerr forwards to **Radarr / Sonarr**.
+3. asks **Google Gemini (Flash)** to identify **every** title it features (a single trailer as well as a "top 10"). If the caption does not name them all, Gemini analyses **the video itself** (frames, on-screen text and audio);
+4. looks each title up on TMDB through **Jellyseerr**, detects **anime**, and sends one request per title, which Jellyseerr forwards to **Radarr / Sonarr**.
 
 ```
 iPhone ─► iOS Shortcut ─► POST /movomatic ─► yt-dlp ─► Gemini ─► Jellyseerr ─► Radarr / Sonarr
@@ -38,7 +38,8 @@ Movomatic is built to run **natively in a Debian/Ubuntu LXC container on Proxmox
 ## Features
 
 - 🔐 API key authentication (`X-API-Key`, compared in constant time).
-- 🧠 Two-step identification: **text first** (fast and cheap), then **video** when confidence is below the threshold.
+- 🎞️ **Multi-title Reels**: top lists, compilations and recommendations are all requested (up to `MAX_TITLES_PER_REEL`).
+- 🧠 Two-step identification: **text first** (fast and cheap), then **video** when the caption does not name every work featured.
 - 📐 **Structured JSON output** enforced on Gemini through a Pydantic schema, so no fragile parsing.
 - 🎯 Picks the right TMDB result with a scoring system: title, original title, year, type and popularity.
 - 🍥 Anime detection (Animation genre + Japanese language), with optional overrides for the Sonarr/Radarr server, quality profile and root folder.
@@ -146,12 +147,13 @@ All settings are environment variables, read from `/etc/movomatic/movomatic.env`
 | `HOST` / `PORT` | `0.0.0.0` / `8000` | Listen address |
 | `LOG_LEVEL` | `info` | `debug`, `info`, `warning`, `error` |
 | `MAX_CONCURRENT_JOBS` | `2` | Reels processed in parallel |
+| `MAX_TITLES_PER_REEL` | `10` | Max titles requested from one Reel |
 | `GEMINI_API_KEY` | — **(required)** | Google AI Studio key |
 | `GEMINI_MODEL` | `gemini-3.5-flash` | Main Gemini model |
 | `GEMINI_FALLBACK_MODELS` | `gemini-3.8-flash,gemini-flash-latest` | Tried in order when the main model is overloaded (429/5xx), times out or is retired (404) |
-| `GEMINI_MIN_CONFIDENCE` | `0.6` | Confidence threshold (0–1) |
+| `GEMINI_MIN_CONFIDENCE` | `0.6` | Per-title confidence threshold (0–1) |
 | `GEMINI_VIDEO_FALLBACK` | `true` | Analyse the video when the text is not enough |
-| `GEMINI_TIMEOUT_SECONDS` | `45` | Timeout per model before falling back |
+| `GEMINI_TIMEOUT_SECONDS` | `45` | Timeout per model before falling back (429/5xx are first retried twice on the same model) |
 | `YTDLP_COOKIES_FILE` | *(empty)* | Netscape cookies file for Instagram |
 | `YTDLP_MAX_FILESIZE_MB` | `100` | Max size of the downloaded video |
 | `YTDLP_MAX_DURATION_SECONDS` | `600` | Max video duration |
@@ -191,7 +193,7 @@ Interactive OpenAPI docs are available at `http://<ip>:8000/docs`.
 ### `GET /health`
 
 ```json
-{ "status": "ok", "version": "1.0.0" }
+{ "status": "ok", "version": "1.1.0" }
 ```
 
 ### `POST /movomatic`
@@ -204,34 +206,44 @@ curl -X POST http://localhost:8000/movomatic \
 
 The `url` field also accepts text that contains the link, which is what the share sheet sometimes sends. Tracking parameters (`?igsh=`, `?utm_source=`) are removed.
 
-**Response (200):**
+**Response (200):** one entry in `results` per title found in the Reel.
 
 ```json
 {
   "status": "requested",
-  "message": "✅ Movie requested: Dune: Part Two (2024)",
+  "message": "🎬 2 titles: 1 requested, 1 already available\n✅ Movie requested: Arrival (2016)\n📺 Ad Astra (2019): already available",
   "source": "metadata",
-  "identification": {
-    "identified": true, "title": "Dune: Part Two", "original_title": null,
-    "year": 2024, "media_type": "movie", "is_anime": false,
-    "confidence": 0.96, "reasoning": "The caption explicitly mentions Dune 2 and Denis Villeneuve."
-  },
-  "media": {
-    "tmdb_id": 693134, "media_type": "movie", "title": "Dune: Part Two", "year": 2024,
-    "is_anime": false, "poster_url": "https://image.tmdb.org/t/p/w500/…jpg"
-  },
-  "request_id": 42
+  "works_featured": 2,
+  "results": [
+    {
+      "status": "requested",
+      "message": "✅ Movie requested: Arrival (2016)",
+      "identification": {
+        "title": "Arrival", "original_title": null, "year": 2016, "media_type": "movie",
+        "is_anime": false, "confidence": 0.95, "reasoning": "Villeneuve film with Amy Adams and aliens."
+      },
+      "media": {
+        "tmdb_id": 329865, "media_type": "movie", "title": "Arrival", "year": 2016,
+        "is_anime": false, "poster_url": "https://image.tmdb.org/t/p/w500/…jpg"
+      },
+      "request_id": 42
+    },
+    { "status": "already_available", "message": "📺 Ad Astra (2019): already available", "…": "…" }
+  ]
 }
 ```
+
+With a single title, `message` is just that title's line (e.g. `✅ Movie requested: Dune (2021)`). The top-level `status` is the best outcome across all titles, in this order:
 
 | `status` | Meaning |
 |---|---|
 | `requested` | Request created in Jellyseerr |
-| `already_available` | Already in the library |
-| `already_requested` | Already requested or downloading |
 | `identified` | Identified, no request sent (`dry_run`) |
-| `not_identified` | Gemini could not identify the title with enough confidence |
+| `already_requested` | Already requested or downloading |
+| `already_available` | Already in the library |
 | `not_found` | Title identified but not found on TMDB |
+| `error` | Jellyseerr refused this title (the others are still processed) |
+| `not_identified` | Gemini could not identify any title with enough confidence |
 
 **Errors:** `401` (invalid key), `422` (invalid URL or unreadable Reel), `502` (Gemini or Jellyseerr error). The body is always `{"status": "error", "message": "❌ …"}`, so the Shortcut still shows a clear message.
 

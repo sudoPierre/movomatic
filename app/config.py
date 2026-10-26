@@ -26,6 +26,8 @@ class Settings(BaseSettings):
     port: int = Field(8000, ge=1, le=65535)
     log_level: Literal["debug", "info", "warning", "error"] = "info"
     max_concurrent_jobs: int = Field(2, ge=1, le=16)
+    # Upper bound on titles requested from a single Reel (e.g. a "top 10").
+    max_titles_per_reel: int = Field(10, ge=1, le=50)
 
     # --- Gemini ---
     gemini_api_key: SecretStr

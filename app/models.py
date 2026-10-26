@@ -69,23 +69,38 @@ class ReelMetadata(BaseModel):
 # Gemini — structured output schema
 # --------------------------------------------------------------------------- #
 class MediaIdentification(BaseModel):
-    """JSON schema enforced on Gemini through ``response_schema``."""
+    """One work featured in the Reel (item of ``ReelAnalysis.items``)."""
 
-    identified: bool = Field(description="true if a specific work was identified with reasonable certainty.")
-    title: Optional[str] = Field(None, description="Best-known title (preferably the international/English title).")
+    title: str = Field(description="Best-known title (preferably the international/English title).")
     original_title: Optional[str] = Field(None, description="Original-language title, if different.")
     year: Optional[int] = Field(None, description="Release year (movie) or first air year (series).")
     media_type: Optional[Literal["movie", "tv"]] = Field(
         None, description="'movie' for a film, 'tv' for a series or episodic anime."
     )
     is_anime: bool = Field(description="true if this is Japanese animation (anime).")
-    confidence: float = Field(description="Confidence between 0.0 and 1.0.")
-    reasoning: str = Field("", description="Short justification (one or two sentences).")
+    confidence: float = Field(description="Confidence between 0.0 and 1.0 for this specific title.")
+    reasoning: str = Field("", description="Short justification (one sentence).")
 
     @field_validator("confidence")
     @classmethod
     def _clamp(cls, v: float) -> float:
         return max(0.0, min(1.0, v))
+
+    @property
+    def label(self) -> str:
+        return f"{self.title} ({self.year})" if self.year else self.title
+
+
+class ReelAnalysis(BaseModel):
+    """JSON schema enforced on Gemini through ``response_schema``."""
+
+    works_featured: int = Field(
+        description="Number of distinct movies/series/anime the Reel features, "
+        "including the ones you could not identify. 0 if it is not about any."
+    )
+    items: list[MediaIdentification] = Field(
+        description="Every work you could identify, in order of appearance. Empty if none."
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -93,11 +108,12 @@ class MediaIdentification(BaseModel):
 # --------------------------------------------------------------------------- #
 class Status(str, Enum):
     REQUESTED = "requested"
-    ALREADY_AVAILABLE = "already_available"
-    ALREADY_REQUESTED = "already_requested"
     IDENTIFIED = "identified"  # dry_run
-    NOT_IDENTIFIED = "not_identified"
+    ALREADY_REQUESTED = "already_requested"
+    ALREADY_AVAILABLE = "already_available"
     NOT_FOUND = "not_found"
+    ERROR = "error"
+    NOT_IDENTIFIED = "not_identified"
 
 
 class MediaResult(BaseModel):
@@ -109,13 +125,22 @@ class MediaResult(BaseModel):
     poster_url: Optional[str] = None
 
 
-class MovomaticResponse(BaseModel):
+class ItemResult(BaseModel):
+    """Outcome for one title found in the Reel."""
+
     status: Status
-    message: str = Field(description="Short message, ready to be shown in an iOS notification.")
-    source: Optional[Literal["metadata", "video"]] = None
-    identification: Optional[MediaIdentification] = None
+    message: str
+    identification: MediaIdentification
     media: Optional[MediaResult] = None
     request_id: Optional[int] = None
+
+
+class MovomaticResponse(BaseModel):
+    status: Status = Field(description="Best outcome across all titles (requested > identified > ...).")
+    message: str = Field(description="Ready to be shown in an iOS notification (one line per title).")
+    source: Optional[Literal["metadata", "video"]] = None
+    works_featured: int = Field(0, description="Number of works Gemini thinks the Reel features.")
+    results: list[ItemResult] = Field(default_factory=list)
 
 
 class ErrorResponse(BaseModel):

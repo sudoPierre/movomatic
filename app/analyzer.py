@@ -11,33 +11,41 @@ from google.genai import types
 
 from app.config import Settings
 from app.extractor import guess_mime_type
-from app.models import MediaIdentification, ReelMetadata
+from app.models import ReelAnalysis, ReelMetadata
 
 logger = logging.getLogger(__name__)
 
 SYSTEM_PROMPT = """\
 You are a film, TV series and anime expert. You receive data from an Instagram Reel
-(caption, hashtags, author and sometimes the video itself). Your task is to identify the
-SINGLE movie, TV series or anime the Reel is about, so it can be requested on a media server.
+(caption, hashtags, author and sometimes the video itself). Your task is to identify EVERY
+movie, TV series or anime the Reel features, so they can all be requested on a media server.
 
 Rules:
 - Use every clue: explicit titles, hashtags, actor names, characters, quotes, scenes,
   on-screen text, soundtrack, the author's handle (e.g. a studio or distributor account).
+- A Reel can feature one work or several (top 10, "movies like...", compilations,
+  recommendations). List each distinct work once in "items", in order of appearance.
+- "works_featured" is how many distinct works the Reel features, including the ones you
+  could not identify (e.g. a "top 5" whose titles are not in the caption is 5).
 - "title" must be the most widely known title, preferably the international/English title
   as listed on TMDB. Put the original-language title in "original_title" when different.
 - "media_type" is "movie" for a feature film, "tv" for a series, mini-series or episodic anime.
   An anime movie is "movie" with is_anime=true.
 - "is_anime" is true only for Japanese animation.
 - "year" is the release year (movie) or first air year (series).
-- If several works are mentioned (top 10, compilation...), pick the main one or the first one;
-  if none stands out, set identified=false.
-- Never invent a title. If you are not reasonably sure, set identified=false and a low confidence.
-- "confidence" ranges from 0.0 to 1.0. "reasoning" is one or two short sentences.
+- Ignore works only mentioned in passing (e.g. "from the director of X") unless the Reel
+  is clearly recommending them too.
+- Never invent a title. Only list works you are reasonably sure about; give each its own
+  "confidence" from 0.0 to 1.0. "reasoning" is one short sentence.
 """
 
 
 # Errors worth retrying with the next model: retired model, quota, overload, timeout.
 RETRYABLE_CODES = {404, 408, 429, 500, 502, 503, 504}
+# Short overload spikes: retry the same model a couple of times before switching.
+TRANSIENT_CODES = {429, 500, 502, 503}
+TRANSIENT_RETRIES = 2
+RETRY_BACKOFF_SECONDS = 2.0
 
 
 class AnalysisError(RuntimeError):
@@ -51,17 +59,17 @@ class GeminiAnalyzer:
         self._config = types.GenerateContentConfig(
             system_instruction=SYSTEM_PROMPT,
             response_mime_type="application/json",
-            response_schema=MediaIdentification,
+            response_schema=ReelAnalysis,
             temperature=0.1,
             # No tools are used: skip the SDK's function-calling loop (and its log line).
             automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
         )
 
-    async def analyze_metadata(self, meta: ReelMetadata) -> MediaIdentification:
-        prompt = "Identify the work from this Instagram Reel data:\n\n" + meta.as_prompt_text()
+    async def analyze_metadata(self, meta: ReelMetadata) -> ReelAnalysis:
+        prompt = "Identify the works featured in this Instagram Reel data:\n\n" + meta.as_prompt_text()
         return await self._generate([prompt])
 
-    async def analyze_video(self, video: Path, meta: ReelMetadata) -> MediaIdentification:
+    async def analyze_video(self, video: Path, meta: ReelMetadata) -> ReelAnalysis:
         client = self._client
         uploaded = await client.aio.files.upload(
             file=video,
@@ -70,7 +78,7 @@ class GeminiAnalyzer:
         try:
             uploaded = await self._wait_until_active(uploaded)
             prompt = (
-                "Identify the work shown in this Instagram Reel video. "
+                "Identify every work shown in this Instagram Reel video. "
                 "Look at the scenes, characters, on-screen text and listen to the audio. "
                 "Additional context from the post:\n\n" + meta.as_prompt_text()
             )
@@ -93,42 +101,52 @@ class GeminiAnalyzer:
             raise AnalysisError("Gemini failed to process the video")
         return file
 
-    async def _generate(self, contents: list) -> MediaIdentification:
+    async def _generate(self, contents: list) -> ReelAnalysis:
         models = self._settings.gemini_models
         last_error = ""
+        response = None
         for index, model in enumerate(models):
-            try:
-                response = await asyncio.wait_for(
-                    self._client.aio.models.generate_content(
-                        model=model, contents=contents, config=self._config
-                    ),
-                    timeout=self._settings.gemini_timeout_seconds,
-                )
+            for attempt in range(1 + TRANSIENT_RETRIES):
+                if attempt:
+                    await asyncio.sleep(RETRY_BACKOFF_SECONDS * attempt)
+                try:
+                    response = await asyncio.wait_for(
+                        self._client.aio.models.generate_content(
+                            model=model, contents=contents, config=self._config
+                        ),
+                        timeout=self._settings.gemini_timeout_seconds,
+                    )
+                    break
+                except asyncio.TimeoutError:
+                    last_error = f"{model} timed out"
+                    break  # a slow model will not get faster: move on
+                except genai_errors.APIError as exc:
+                    # Bad request / key problems will not get better with another model.
+                    if exc.code not in RETRYABLE_CODES:
+                        raise AnalysisError(f"Gemini API error ({exc.code}): {exc.message}") from exc
+                    last_error = f"{model} returned {exc.code}"
+                    if exc.code not in TRANSIENT_CODES:
+                        break
+                    logger.info("Gemini: %s (attempt %d)", last_error, attempt + 1)
+            if response is not None:
                 break
-            except asyncio.TimeoutError:
-                last_error = f"{model} timed out"
-            except genai_errors.APIError as exc:
-                # Bad request / key problems will not get better with another model.
-                if exc.code not in RETRYABLE_CODES:
-                    raise AnalysisError(f"Gemini API error ({exc.code}): {exc.message}") from exc
-                last_error = f"{model} returned {exc.code}"
             if index + 1 < len(models):
                 logger.warning("Gemini: %s, falling back to %s", last_error, models[index + 1])
-        else:
+        if response is None:
             raise AnalysisError(f"Gemini unavailable ({last_error})")
 
         parsed = response.parsed
-        if isinstance(parsed, MediaIdentification):
+        if isinstance(parsed, ReelAnalysis):
             result = parsed
         else:
-            text = response.text or ""
             try:
-                result = MediaIdentification.model_validate_json(text)
+                result = ReelAnalysis.model_validate_json(response.text or "")
             except ValueError as exc:
                 raise AnalysisError("unreadable Gemini response") from exc
         logger.info(
-            "Gemini: identified=%s title=%r year=%s type=%s anime=%s confidence=%.2f",
-            result.identified, result.title, result.year,
-            result.media_type, result.is_anime, result.confidence,
+            "Gemini (%s): %d work(s) featured, identified: %s",
+            model, result.works_featured,
+            ", ".join(f"{i.label} [{i.media_type}{' anime' if i.is_anime else ''} {i.confidence:.2f}]"
+                      for i in result.items) or "none",
         )
         return result

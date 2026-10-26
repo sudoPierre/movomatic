@@ -157,7 +157,7 @@ class JellyseerrClient:
 # ---------------------------------------------------------------------- #
 # Helpers
 # ---------------------------------------------------------------------- #
-def _normalize(text: Optional[str]) -> str:
+def normalize_title(text: Optional[str]) -> str:
     if not text:
         return ""
     text = unicodedata.normalize("NFKD", text)
@@ -183,9 +183,9 @@ def is_anime_result(result: dict[str, Any]) -> bool:
 
 def _score(result: dict[str, Any], ident: MediaIdentification, rank: int) -> float:
     score = 0.0
-    wanted = {_normalize(ident.title), _normalize(ident.original_title)} - {""}
+    wanted = {normalize_title(ident.title), normalize_title(ident.original_title)} - {""}
     candidates = {
-        _normalize(result.get(k)) for k in ("title", "name", "originalTitle", "originalName")
+        normalize_title(result.get(k)) for k in ("title", "name", "originalTitle", "originalName")
     } - {""}
 
     if wanted & candidates:
