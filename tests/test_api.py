@@ -362,12 +362,40 @@ def test_extraction_error_returns_422(make_client):
     assert "login required" in resp.json()["message"]
 
 
-def test_jellyseerr_down_returns_502(make_client, jellyseerr_mock):
+def test_jellyseerr_down_returns_503(make_client, jellyseerr_mock):
+    # Not 502: Cloudflare would replace the JSON body with its own HTML error page.
     client, _ = make_client()
     jellyseerr_mock.get("/api/v1/search").mock(side_effect=httpx.ConnectError("refused"))
     resp = post(client)
-    assert resp.status_code == 502
+    assert resp.status_code == 503
     assert resp.json()["status"] == "error"
+
+
+async def test_slow_job_answers_early_and_finishes_in_background(make_client, jellyseerr_mock):
+    from app import main
+
+    _, services = make_client(settings=make_settings(response_timeout_seconds=0.05))
+    slow = asyncio.Event()
+
+    async def slow_analysis(meta):
+        await slow.wait()
+        return analysis(ident())
+
+    services.analyzer.analyze_metadata = AsyncMock(side_effect=slow_analysis)
+    jellyseerr_mock.get("/api/v1/search").respond(json={"results": [DUNE_RESULT]})
+    request = jellyseerr_mock.post("/api/v1/request").respond(201, json={"id": 1})
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.post("/movomatic", json={"url": REEL}, headers={"X-API-Key": API_KEY})
+
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "processing"
+    assert not request.called
+
+    slow.set()  # Gemini finally answers: the job must still request the title
+    await asyncio.gather(*main._background_jobs)
+    assert request.called
 
 
 # --------------------------------------------------------------------------- #
@@ -388,6 +416,7 @@ def _gemini(side_effect):
 @pytest.fixture(autouse=True)
 def no_backoff(monkeypatch):
     monkeypatch.setattr("app.analyzer.RETRY_BACKOFF_SECONDS", 0)
+    monkeypatch.setattr("app.analyzer.ROUND_PAUSE_SECONDS", 0)
 
 
 async def test_gemini_falls_back_to_next_model():
@@ -426,5 +455,19 @@ async def test_gemini_all_models_unavailable():
     from app.analyzer import AnalysisError, GeminiAnalyzer
 
     client = _gemini([_api_error(503)] * 9)
+    settings = make_settings(gemini_patience_seconds=0)
     with pytest.raises(AnalysisError, match="Gemini unavailable"):
-        await GeminiAnalyzer(make_settings(), client=client).analyze_metadata(ReelMetadata(url=REEL))
+        await GeminiAnalyzer(settings, client=client).analyze_metadata(ReelMetadata(url=REEL))
+    assert client.aio.models.generate_content.await_count == 9
+
+
+async def test_gemini_starts_another_round_when_everything_is_overloaded(monkeypatch):
+    from app.analyzer import GeminiAnalyzer
+
+    monkeypatch.setattr("app.analyzer.ROUND_PAUSE_SECONDS", 0.01)
+    # First round: 3 models x 3 attempts all overloaded; second round: first model answers.
+    client = _gemini([_api_error(503)] * 9 + [MagicMock(parsed=analysis(ident()))])
+    settings = make_settings(gemini_patience_seconds=60)
+    result = await GeminiAnalyzer(settings, client=client).analyze_metadata(ReelMetadata(url=REEL))
+    assert result.items[0].title == "Dune: Part Two"
+    assert client.aio.models.generate_content.await_count == 10

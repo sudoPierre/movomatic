@@ -26,6 +26,11 @@ class Settings(BaseSettings):
     port: int = Field(8000, ge=1, le=65535)
     log_level: Literal["debug", "info", "warning", "error"] = "info"
     max_concurrent_jobs: int = Field(2, ge=1, le=16)
+    # Answer the iOS Shortcut after this delay even if the job is not done; the job
+    # keeps running and still sends the requests. Keep it under the Shortcut timeout (~60s).
+    response_timeout_seconds: float = Field(50, gt=0)
+    # Hard limit for a whole job (extraction + Gemini + Jellyseerr).
+    job_timeout_seconds: int = Field(900, ge=30)
     # Upper bound on titles requested from a single Reel (e.g. a "top 10").
     max_titles_per_reel: int = Field(10, ge=1, le=50)
 
@@ -37,6 +42,8 @@ class Settings(BaseSettings):
     gemini_min_confidence: float = Field(0.6, ge=0.0, le=1.0)
     gemini_video_fallback: bool = True
     gemini_timeout_seconds: int = Field(45, ge=5)
+    # How long to keep retrying when every model is overloaded (runs in the background).
+    gemini_patience_seconds: int = Field(300, ge=0)
 
     # --- yt-dlp ---
     ytdlp_cookies_file: Optional[Path] = None

@@ -114,6 +114,7 @@ class Status(str, Enum):
     NOT_FOUND = "not_found"
     ERROR = "error"
     NOT_IDENTIFIED = "not_identified"
+    PROCESSING = "processing"  # answered early, the job continues in the background
 
 
 class MediaResult(BaseModel):

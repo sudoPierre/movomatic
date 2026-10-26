@@ -46,6 +46,8 @@ RETRYABLE_CODES = {404, 408, 429, 500, 502, 503, 504}
 TRANSIENT_CODES = {429, 500, 502, 503}
 TRANSIENT_RETRIES = 2
 RETRY_BACKOFF_SECONDS = 2.0
+# Pause between two full rounds over every model (bounded by GEMINI_PATIENCE_SECONDS).
+ROUND_PAUSE_SECONDS = 20.0
 
 
 class AnalysisError(RuntimeError):
@@ -101,14 +103,12 @@ class GeminiAnalyzer:
             raise AnalysisError("Gemini failed to process the video")
         return file
 
-    async def _generate(self, contents: list) -> ReelAnalysis:
+    async def _try_models(self, contents: list) -> tuple[Optional[types.GenerateContentResponse], str, str]:
+        """One round over the configured models. Returns (response, model, last_error)."""
         models = self._settings.gemini_models
         last_error = ""
-        response = None
         for index, model in enumerate(models):
             for attempt in range(1 + TRANSIENT_RETRIES):
-                if attempt:
-                    await asyncio.sleep(RETRY_BACKOFF_SECONDS * attempt)
                 try:
                     response = await asyncio.wait_for(
                         self._client.aio.models.generate_content(
@@ -116,7 +116,7 @@ class GeminiAnalyzer:
                         ),
                         timeout=self._settings.gemini_timeout_seconds,
                     )
-                    break
+                    return response, model, ""
                 except asyncio.TimeoutError:
                     last_error = f"{model} timed out"
                     break  # a slow model will not get faster: move on
@@ -125,15 +125,34 @@ class GeminiAnalyzer:
                     if exc.code not in RETRYABLE_CODES:
                         raise AnalysisError(f"Gemini API error ({exc.code}): {exc.message}") from exc
                     last_error = f"{model} returned {exc.code}"
-                    if exc.code not in TRANSIENT_CODES:
+                    if exc.code not in TRANSIENT_CODES or attempt == TRANSIENT_RETRIES:
                         break
                     logger.info("Gemini: %s (attempt %d)", last_error, attempt + 1)
-            if response is not None:
-                break
+                    # Quota errors (429) need a longer pause than overload spikes (5xx).
+                    factor = 3 if exc.code == 429 else 1
+                    await asyncio.sleep(RETRY_BACKOFF_SECONDS * factor * (attempt + 1))
             if index + 1 < len(models):
                 logger.warning("Gemini: %s, falling back to %s", last_error, models[index + 1])
-        if response is None:
-            raise AnalysisError(f"Gemini unavailable ({last_error})")
+        return None, "", last_error
+
+    async def _generate(self, contents: list) -> ReelAnalysis:
+        """Go through every model; when all are overloaded, pause and start another round."""
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self._settings.gemini_patience_seconds
+        round_number = 1
+        while True:
+            response, model, last_error = await self._try_models(contents)
+            if response is not None:
+                break
+            remaining = deadline - loop.time()
+            if remaining <= ROUND_PAUSE_SECONDS:
+                raise AnalysisError(f"Gemini unavailable ({last_error})")
+            logger.warning(
+                "Gemini: every model failed (round %d, %s), retrying in %.0fs",
+                round_number, last_error, ROUND_PAUSE_SECONDS,
+            )
+            await asyncio.sleep(ROUND_PAUSE_SECONDS)
+            round_number += 1
 
         parsed = response.parsed
         if isinstance(parsed, ReelAnalysis):

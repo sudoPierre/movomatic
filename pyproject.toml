@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "movomatic"
-version = "1.1.0"
+version = "1.2.0"
 description = "Instagram Reel ➜ Gemini ➜ Jellyseerr: request a movie or series straight from the iOS share sheet."
 readme = "README.md"
 license = "MIT"

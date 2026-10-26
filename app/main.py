@@ -116,8 +116,12 @@ async def _extraction_error(_: Request, exc: ExtractionError) -> JSONResponse:
 @app.exception_handler(JellyseerrError)
 async def _upstream_error(_: Request, exc: Exception) -> JSONResponse:
     logger.error("Upstream error: %s", exc)
+    # 503 rather than 502/504: Cloudflare replaces origin 502/504 bodies with its own
+    # HTML page, which the iOS Shortcut cannot parse as a dictionary.
     return JSONResponse(
-        ErrorResponse(message=f"❌ {exc}").model_dump(), status_code=status.HTTP_502_BAD_GATEWAY
+        ErrorResponse(message=f"❌ {exc}").model_dump(),
+        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+        headers={"Retry-After": "60"},
     )
 
 
@@ -133,15 +137,53 @@ async def health() -> HealthResponse:
     "/movomatic",
     response_model=MovomaticResponse,
     dependencies=[Depends(require_api_key)],
-    responses={401: {"model": ErrorResponse}, 422: {"model": ErrorResponse}, 502: {"model": ErrorResponse}},
+    responses={401: {"model": ErrorResponse}, 422: {"model": ErrorResponse}, 503: {"model": ErrorResponse}},
     tags=["movomatic"],
 )
 async def movomatic(
     body: MovomaticRequest,
     services: Annotated[Services, Depends(get_services)],
 ) -> MovomaticResponse:
+    # The job runs in its own task so it survives the Shortcut giving up (or our early
+    # answer below): titles still get requested once the analysis is done.
+    task = asyncio.create_task(_run_job(body, services))
+    _background_jobs.add(task)
+    task.add_done_callback(_background_jobs.discard)
+    task.add_done_callback(_log_outcome)
+
+    done, _ = await asyncio.wait({task}, timeout=services.settings.response_timeout_seconds)
+    if task in done:
+        return task.result()
+
+    logger.info("Job for %s still running: answering the Shortcut now", body.url)
+    return MovomaticResponse(
+        status=Status.PROCESSING,
+        message="⏳ Still analysing this Reel. The titles will be requested automatically "
+        "when it is done (check Jellyseerr in a few minutes).",
+    )
+
+
+# Strong references to running jobs (asyncio only keeps weak ones).
+_background_jobs: set[asyncio.Task] = set()
+
+
+async def _run_job(body: MovomaticRequest, services: Services) -> MovomaticResponse:
     async with services.semaphore:
-        return await process_reel(body, services)
+        try:
+            return await asyncio.wait_for(
+                process_reel(body, services), timeout=services.settings.job_timeout_seconds
+            )
+        except asyncio.TimeoutError as exc:
+            raise AnalysisError("the analysis took too long") from exc
+
+
+def _log_outcome(task: asyncio.Task) -> None:
+    if task.cancelled():
+        logger.warning("Job cancelled")
+    elif task.exception() is not None:
+        logger.error("Job failed: %s", task.exception())
+    else:
+        logger.info("Job done: %s", task.result().message.replace("\n", " | "))
 
 
 # --------------------------------------------------------------------------- #

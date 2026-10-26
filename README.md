@@ -148,12 +148,15 @@ All settings are environment variables, read from `/etc/movomatic/movomatic.env`
 | `LOG_LEVEL` | `info` | `debug`, `info`, `warning`, `error` |
 | `MAX_CONCURRENT_JOBS` | `2` | Reels processed in parallel |
 | `MAX_TITLES_PER_REEL` | `10` | Max titles requested from one Reel |
+| `RESPONSE_TIMEOUT_SECONDS` | `50` | Answer the Shortcut after this delay even if the job is not done (it keeps running in the background) |
+| `JOB_TIMEOUT_SECONDS` | `900` | Hard limit for a whole job |
 | `GEMINI_API_KEY` | — **(required)** | Google AI Studio key |
 | `GEMINI_MODEL` | `gemini-3.5-flash` | Main Gemini model |
 | `GEMINI_FALLBACK_MODELS` | `gemini-3.8-flash,gemini-flash-latest` | Tried in order when the main model is overloaded (429/5xx), times out or is retired (404) |
 | `GEMINI_MIN_CONFIDENCE` | `0.6` | Per-title confidence threshold (0–1) |
 | `GEMINI_VIDEO_FALLBACK` | `true` | Analyse the video when the text is not enough |
 | `GEMINI_TIMEOUT_SECONDS` | `45` | Timeout per model before falling back (429/5xx are first retried twice on the same model) |
+| `GEMINI_PATIENCE_SECONDS` | `300` | When every model is overloaded, keep retrying (rounds 20 s apart) for this long |
 | `YTDLP_COOKIES_FILE` | *(empty)* | Netscape cookies file for Instagram |
 | `YTDLP_MAX_FILESIZE_MB` | `100` | Max size of the downloaded video |
 | `YTDLP_MAX_DURATION_SECONDS` | `600` | Max video duration |
@@ -184,7 +187,7 @@ After changing anything: `systemctl restart movomatic`.
 
 In Instagram, tap **Share ➜ Movomatic**. A few seconds later a notification shows something like "✅ Movie requested: Dune: Part Two (2024)".
 
-> Video analysis can take 20 to 60 seconds. Outside your home network, use a VPN (WireGuard, Tailscale…) or an HTTPS reverse proxy (see [Security](#security)).
+> Video analysis usually takes 20 to 40 seconds. If it takes longer (Gemini overloaded), Movomatic answers after 50 s with "⏳ Still analysing…" and finishes in the background. Outside your home network, use a VPN (WireGuard, Tailscale…) or an HTTPS reverse proxy (see [Security](#security)).
 
 ## API
 
@@ -193,7 +196,7 @@ Interactive OpenAPI docs are available at `http://<ip>:8000/docs`.
 ### `GET /health`
 
 ```json
-{ "status": "ok", "version": "1.1.0" }
+{ "status": "ok", "version": "1.2.0" }
 ```
 
 ### `POST /movomatic`
@@ -244,8 +247,9 @@ With a single title, `message` is just that title's line (e.g. `✅ Movie reques
 | `not_found` | Title identified but not found on TMDB |
 | `error` | Jellyseerr refused this title (the others are still processed) |
 | `not_identified` | Gemini could not identify any title with enough confidence |
+| `processing` | Not done within `RESPONSE_TIMEOUT_SECONDS`: the job continues in the background and still sends the requests |
 
-**Errors:** `401` (invalid key), `422` (invalid URL or unreadable Reel), `502` (Gemini or Jellyseerr error). The body is always `{"status": "error", "message": "❌ …"}`, so the Shortcut still shows a clear message.
+**Errors:** `401` (invalid key), `422` (invalid URL or unreadable Reel), `503` (Gemini or Jellyseerr unavailable). Movomatic never returns `502`/`504`, because Cloudflare would replace the JSON body with its own HTML page. The body is always `{"status": "error", "message": "❌ …"}`, so the Shortcut still shows a clear message.
 
 ## Instagram cookies
 
@@ -285,7 +289,8 @@ systemctl restart movomatic    # restart
 | Extraction suddenly fails | `./deploy/install_lxc.sh --update` (new yt-dlp release) |
 | `Jellyseerr API key rejected` | Check `JELLYSEERR_API_KEY` |
 | `Jellyseerr unreachable` | From the CT, run `curl $JELLYSEERR_URL/api/v1/status` |
-| `Gemini unavailable (… returned 429/503)` | Quota exceeded or every model overloaded: wait, turn on billing, or change `GEMINI_FALLBACK_MODELS` |
+| `Gemini unavailable (… returned 429/503)` | Quota exceeded or every model overloaded for `GEMINI_PATIENCE_SECONDS`: wait, check your quota/billing, or change `GEMINI_FALLBACK_MODELS` |
+| Shortcut: *couldn't convert from Rich Text to Dictionary* | The Shortcut received an HTML page instead of JSON (proxy or Cloudflare error page). Check `journalctl -u movomatic` |
 | `Gemini API error (404) … no longer available` | Google retired the model: set `GEMINI_MODEL` to a current one |
 | Service does not start | `journalctl -u movomatic -n 50` shows the configuration validation error |
 | Wrong title identified | Try `"dry_run": true` with `LOG_LEVEL=debug`; raise `GEMINI_MIN_CONFIDENCE` |
