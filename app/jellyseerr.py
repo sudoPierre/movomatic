@@ -24,6 +24,10 @@ MEDIA_STATUS_PARTIALLY_AVAILABLE = 4
 MEDIA_STATUS_AVAILABLE = 5
 
 
+# Score of a search result that must never be requested.
+REJECTED = float("-inf")
+
+
 class JellyseerrError(RuntimeError):
     """Error while talking to Jellyseerr."""
 
@@ -157,12 +161,23 @@ class JellyseerrClient:
 # ---------------------------------------------------------------------- #
 # Helpers
 # ---------------------------------------------------------------------- #
+def _fold(text: str) -> str:
+    text = unicodedata.normalize("NFKD", text)
+    return "".join(c for c in text if not unicodedata.combining(c)).lower()
+
+
 def normalize_title(text: Optional[str]) -> str:
+    """Loose form: letters and digits only ("Reality+" and "Reality" are equal)."""
+    return re.sub(r"[^a-z0-9]+", " ", _fold(text)).strip() if text else ""
+
+
+def strict_title(text: Optional[str]) -> str:
+    """Strict form: ignores punctuation and spacing but keeps meaningful symbols
+    such as + & # @ ("Reality+" differs from "Reality")."""
     if not text:
         return ""
-    text = unicodedata.normalize("NFKD", text)
-    text = "".join(c for c in text if not unicodedata.combining(c))
-    return re.sub(r"[^a-z0-9]+", " ", text.lower()).strip()
+    text = re.sub(r"[\s:;,.!?'\"’‘“”()\[\]\-–—/_]+", " ", _fold(text))
+    return text.strip()
 
 
 def _year(result: dict[str, Any]) -> Optional[int]:
@@ -182,34 +197,41 @@ def is_anime_result(result: dict[str, Any]) -> bool:
 
 
 def _score(result: dict[str, Any], ident: MediaIdentification, rank: int) -> float:
-    score = 0.0
-    wanted = {normalize_title(ident.title), normalize_title(ident.original_title)} - {""}
-    candidates = {
-        normalize_title(result.get(k)) for k in ("title", "name", "originalTitle", "originalName")
-    } - {""}
+    """Higher is better; ``REJECTED`` means the result must never be requested."""
+    keys = ("title", "name", "originalTitle", "originalName")
+    wanted = (ident.title, ident.original_title)
+    strict_wanted = {strict_title(t) for t in wanted} - {""}
+    strict_candidates = {strict_title(result.get(k)) for k in keys} - {""}
+    loose_wanted = {normalize_title(t) for t in wanted} - {""}
+    loose_candidates = {normalize_title(result.get(k)) for k in keys} - {""}
 
-    if wanted & candidates:
-        score += 5
-    elif any(w in c or c in w for w in wanted for c in candidates):
-        score += 2
+    if strict_wanted & strict_candidates:
+        exact = True
+    elif any(w in c or c in w for w in loose_wanted for c in loose_candidates):
+        exact = False  # e.g. "Reality+" vs "Reality", "Dune" vs "Dune: Part Two"
     else:
-        return -10.0  # no title overlap: never selected
-
-    if ident.media_type and result.get("mediaType") == ident.media_type:
-        score += 2
+        return REJECTED
 
     year = _year(result)
-    if ident.year and year:
-        if year == ident.year:
-            score += 3
-        elif abs(year - ident.year) == 1:
-            score += 1.5
-        else:
-            score -= 1
+    year_gap = abs(year - ident.year) if ident.year and year else None
+    if not exact and year_gap not in (None, 0):
+        # An approximate title is only trusted when the year matches exactly:
+        # it avoids requesting a different film that merely shares a word.
+        return REJECTED
+    if exact and year_gap is not None and year_gap > 1 and result.get("mediaType") == "movie":
+        return REJECTED  # same title, other film (remake, homonym)
 
+    score = 5.0 if exact else 2.0
+    if ident.media_type and result.get("mediaType") == ident.media_type:
+        score += 2
+    if year_gap == 0:
+        score += 3
+    elif year_gap == 1:
+        score += 1.5
+    elif year_gap is not None:
+        score -= 1  # series: first-air year is often off
     if ident.is_anime and is_anime_result(result):
         score += 1
-
     # TMDB already sorts by relevance/popularity: small bonus for top results.
     score += max(0.0, 1.0 - rank * 0.2)
     return score

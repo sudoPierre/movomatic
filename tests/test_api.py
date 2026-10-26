@@ -267,6 +267,38 @@ def test_best_match_prefers_year_and_type(make_client, jellyseerr_mock):
     assert post(client).json()["results"][0]["media"]["tmdb_id"] == 438631
 
 
+REALITY_2015 = {"id": 179150, "mediaType": "movie", "title": "Reality", "originalTitle": "Réalité",
+                "releaseDate": "2015-02-18", "genreIds": [35], "originalLanguage": "fr"}
+
+
+@pytest.mark.parametrize(
+    "item, results, expected",
+    [
+        # Real case: TMDB ignores "+", so "Reality+" (2014) only finds "Reality" (2015).
+        (ident(title="Reality+", year=2014), [REALITY_2015], None),
+        # Approximate title + exact year is accepted.
+        (ident(title="Dune", year=2024), [DUNE_RESULT], 693134),
+        # Approximate title + other year is rejected.
+        (ident(title="Dune", year=2021), [DUNE_RESULT], None),
+        # Same title but a different decade: a homonym or remake, rejected for movies.
+        (ident(title="Dune: Part Two", year=1984), [DUNE_RESULT], None),
+        # Same title, release year off by one (country release dates): accepted.
+        (ident(title="Dune: Part Two", year=2023), [DUNE_RESULT], 693134),
+        # Punctuation differences do not matter.
+        (ident(title="Dune - Part Two", year=None), [DUNE_RESULT], 693134),
+        # Series: first-air year is often wrong, exact title still accepted.
+        (ident(title="Frieren: Beyond Journey's End", year=2020, media_type="tv", is_anime=True),
+         [FRIEREN_RESULT], 209867),
+    ],
+)
+async def test_title_matching_rules(item, results, expected):
+    settings = make_settings()
+    with respx.mock(base_url=JELLYSEERR) as mock:
+        mock.get("/api/v1/search").respond(json={"results": results})
+        match = await JellyseerrClient(settings).find_best_match(item)
+    assert (match.tmdb_id if match else None) == expected
+
+
 # --------------------------------------------------------------------------- #
 # Several titles in one Reel
 # --------------------------------------------------------------------------- #

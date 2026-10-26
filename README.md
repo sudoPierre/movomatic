@@ -41,7 +41,7 @@ Movomatic is built to run **natively in a Debian/Ubuntu LXC container on Proxmox
 - 🎞️ **Multi-title Reels**: top lists, compilations and recommendations are all requested (up to `MAX_TITLES_PER_REEL`).
 - 🧠 Two-step identification: **text first** (fast and cheap), then **video** when the caption does not name every work featured.
 - 📐 **Structured JSON output** enforced on Gemini through a Pydantic schema, so no fragile parsing.
-- 🎯 Picks the right TMDB result with a scoring system: title, original title, year, type and popularity.
+- 🎯 Picks the right TMDB result with a scoring system (title, original title, year, type, popularity). An approximate title is only accepted when the year matches exactly, so a similar-sounding film is never requested by mistake.
 - 🍥 Anime detection (Animation genre + Japanese language), with optional overrides for the Sonarr/Radarr server, quality profile and root folder.
 - ♻️ No duplicates: titles that are already available or already requested are reported without a new request.
 - 🧪 `dry_run` mode to identify without requesting anything.
@@ -196,7 +196,7 @@ Interactive OpenAPI docs are available at `http://<ip>:8000/docs`.
 ### `GET /health`
 
 ```json
-{ "status": "ok", "version": "1.2.0" }
+{ "status": "ok", "version": "1.2.1" }
 ```
 
 ### `POST /movomatic`
