@@ -1,6 +1,6 @@
 [Unit]
 Description=Movomatic — Instagram Reel ➜ Gemini ➜ Jellyseerr
-Documentation=https://github.com/YOUR_GITHUB_USER/movomatic
+Documentation=https://github.com/sudoPierre/movomatic
 After=network-online.target
 Wants=network-online.target
 

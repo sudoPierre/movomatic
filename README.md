@@ -82,7 +82,7 @@ Dans le conteneur :
 
 ```bash
 apt update && apt install -y git
-git clone https://github.com/YOUR_GITHUB_USER/movomatic.git
+git clone https://github.com/sudoPierre/movomatic.git
 cd movomatic
 sudo ./deploy/install_lxc.sh
 ```
@@ -262,7 +262,7 @@ sudo systemctl restart movomatic   # redémarrage
 ## Développement
 
 ```bash
-git clone https://github.com/YOUR_GITHUB_USER/movomatic.git && cd movomatic
+git clone https://github.com/sudoPierre/movomatic.git && cd movomatic
 python3 -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
 cp .env.example .env   # puis renseigne les clés
