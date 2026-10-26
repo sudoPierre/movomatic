@@ -6,7 +6,7 @@ Movomatic is a lightweight FastAPI microservice. It:
 
 1. receives an Instagram Reel URL sent by an **iOS Shortcut** from the share sheet;
 2. extracts the caption, hashtags and author with **yt-dlp**;
-3. asks **Google Gemini 2.5 Flash** to identify the title. If the caption is not enough, Gemini analyses **the video itself** (frames, on-screen text and audio);
+3. asks **Google Gemini (Flash)** to identify the title. If the caption is not enough, Gemini analyses **the video itself** (frames, on-screen text and audio);
 4. looks the title up on TMDB through **Jellyseerr**, detects **anime**, and sends the request, which Jellyseerr forwards to **Radarr / Sonarr**.
 
 ```
@@ -147,10 +147,11 @@ All settings are environment variables, read from `/etc/movomatic/movomatic.env`
 | `LOG_LEVEL` | `info` | `debug`, `info`, `warning`, `error` |
 | `MAX_CONCURRENT_JOBS` | `2` | Reels processed in parallel |
 | `GEMINI_API_KEY` | — **(required)** | Google AI Studio key |
-| `GEMINI_MODEL` | `gemini-2.5-flash` | Gemini model |
+| `GEMINI_MODEL` | `gemini-3.5-flash` | Main Gemini model |
+| `GEMINI_FALLBACK_MODELS` | `gemini-3.8-flash,gemini-flash-latest` | Tried in order when the main model is overloaded (429/5xx), times out or is retired (404) |
 | `GEMINI_MIN_CONFIDENCE` | `0.6` | Confidence threshold (0–1) |
 | `GEMINI_VIDEO_FALLBACK` | `true` | Analyse the video when the text is not enough |
-| `GEMINI_TIMEOUT_SECONDS` | `180` | Max duration of a Gemini call |
+| `GEMINI_TIMEOUT_SECONDS` | `45` | Timeout per model before falling back |
 | `YTDLP_COOKIES_FILE` | *(empty)* | Netscape cookies file for Instagram |
 | `YTDLP_MAX_FILESIZE_MB` | `100` | Max size of the downloaded video |
 | `YTDLP_MAX_DURATION_SECONDS` | `600` | Max video duration |
@@ -272,7 +273,8 @@ systemctl restart movomatic    # restart
 | Extraction suddenly fails | `./deploy/install_lxc.sh --update` (new yt-dlp release) |
 | `Jellyseerr API key rejected` | Check `JELLYSEERR_API_KEY` |
 | `Jellyseerr unreachable` | From the CT, run `curl $JELLYSEERR_URL/api/v1/status` |
-| `Gemini API error (429)` | Free quota exceeded: wait or turn on billing |
+| `Gemini unavailable (… returned 429/503)` | Quota exceeded or every model overloaded: wait, turn on billing, or change `GEMINI_FALLBACK_MODELS` |
+| `Gemini API error (404) … no longer available` | Google retired the model: set `GEMINI_MODEL` to a current one |
 | Service does not start | `journalctl -u movomatic -n 50` shows the configuration validation error |
 | Wrong title identified | Try `"dry_run": true` with `LOG_LEVEL=debug`; raise `GEMINI_MIN_CONFIDENCE` |
 | `create_lxc.sh`: no network | Check the bridge/VLAN/gateway, or use `--dns` |

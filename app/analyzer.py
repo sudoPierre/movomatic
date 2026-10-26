@@ -36,6 +36,10 @@ Rules:
 """
 
 
+# Errors worth retrying with the next model: retired model, quota, overload, timeout.
+RETRYABLE_CODES = {404, 408, 429, 500, 502, 503, 504}
+
+
 class AnalysisError(RuntimeError):
     """Gemini could not produce a usable answer."""
 
@@ -88,19 +92,28 @@ class GeminiAnalyzer:
         return file
 
     async def _generate(self, contents: list) -> MediaIdentification:
-        try:
-            response = await asyncio.wait_for(
-                self._client.aio.models.generate_content(
-                    model=self._settings.gemini_model,
-                    contents=contents,
-                    config=self._config,
-                ),
-                timeout=self._settings.gemini_timeout_seconds,
-            )
-        except asyncio.TimeoutError as exc:
-            raise AnalysisError("Gemini call timed out") from exc
-        except genai_errors.APIError as exc:
-            raise AnalysisError(f"Gemini API error ({exc.code}): {exc.message}") from exc
+        models = self._settings.gemini_models
+        last_error = ""
+        for index, model in enumerate(models):
+            try:
+                response = await asyncio.wait_for(
+                    self._client.aio.models.generate_content(
+                        model=model, contents=contents, config=self._config
+                    ),
+                    timeout=self._settings.gemini_timeout_seconds,
+                )
+                break
+            except asyncio.TimeoutError:
+                last_error = f"{model} timed out"
+            except genai_errors.APIError as exc:
+                # Bad request / key problems will not get better with another model.
+                if exc.code not in RETRYABLE_CODES:
+                    raise AnalysisError(f"Gemini API error ({exc.code}): {exc.message}") from exc
+                last_error = f"{model} returned {exc.code}"
+            if index + 1 < len(models):
+                logger.warning("Gemini: %s, falling back to %s", last_error, models[index + 1])
+        else:
+            raise AnalysisError(f"Gemini unavailable ({last_error})")
 
         parsed = response.parsed
         if isinstance(parsed, MediaIdentification):

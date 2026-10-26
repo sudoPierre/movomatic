@@ -259,3 +259,48 @@ def test_jellyseerr_down_returns_502(make_client, jellyseerr_mock):
     resp = post(client)
     assert resp.status_code == 502
     assert resp.json()["status"] == "error"
+
+
+# --------------------------------------------------------------------------- #
+# Gemini model fallback
+# --------------------------------------------------------------------------- #
+def _api_error(code: int):
+    from google.genai import errors
+
+    return errors.APIError(code, {"error": {"code": code, "message": "boom", "status": "X"}})
+
+
+def _gemini(side_effect):
+    client = MagicMock()
+    client.aio.models.generate_content = AsyncMock(side_effect=side_effect)
+    return client
+
+
+async def test_gemini_falls_back_to_next_model():
+    from app.analyzer import GeminiAnalyzer
+
+    ok = MagicMock(parsed=ident())
+    client = _gemini([_api_error(503), _api_error(404), ok])
+    settings = make_settings(gemini_model="a", gemini_fallback_models="b, c,a")
+    result = await GeminiAnalyzer(settings, client=client).analyze_metadata(ReelMetadata(url=REEL))
+
+    assert result.title == "Dune: Part Two"
+    models = [c.kwargs["model"] for c in client.aio.models.generate_content.await_args_list]
+    assert models == ["a", "b", "c"]
+
+
+async def test_gemini_does_not_retry_auth_errors():
+    from app.analyzer import AnalysisError, GeminiAnalyzer
+
+    client = _gemini([_api_error(403)])
+    with pytest.raises(AnalysisError, match="403"):
+        await GeminiAnalyzer(make_settings(), client=client).analyze_metadata(ReelMetadata(url=REEL))
+    assert client.aio.models.generate_content.await_count == 1
+
+
+async def test_gemini_all_models_unavailable():
+    from app.analyzer import AnalysisError, GeminiAnalyzer
+
+    client = _gemini([_api_error(429), _api_error(503), _api_error(504)])
+    with pytest.raises(AnalysisError, match="Gemini unavailable"):
+        await GeminiAnalyzer(make_settings(), client=client).analyze_metadata(ReelMetadata(url=REEL))

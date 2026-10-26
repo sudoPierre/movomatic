@@ -29,10 +29,12 @@ class Settings(BaseSettings):
 
     # --- Gemini ---
     gemini_api_key: SecretStr
-    gemini_model: str = "gemini-2.5-flash"
+    gemini_model: str = "gemini-3.5-flash"
+    # Tried in order when the main model is overloaded, rate-limited or retired.
+    gemini_fallback_models: str = "gemini-3.8-flash,gemini-flash-latest"
     gemini_min_confidence: float = Field(0.6, ge=0.0, le=1.0)
     gemini_video_fallback: bool = True
-    gemini_timeout_seconds: int = Field(180, ge=10)
+    gemini_timeout_seconds: int = Field(45, ge=5)
 
     # --- yt-dlp ---
     ytdlp_cookies_file: Optional[Path] = None
@@ -81,6 +83,14 @@ class Settings(BaseSettings):
     @classmethod
     def _empty_is_none(cls, v):
         return None if v == "" else v
+
+    @property
+    def gemini_models(self) -> list[str]:
+        models = [self.gemini_model]
+        for name in self.gemini_fallback_models.split(","):
+            if name.strip() and name.strip() not in models:
+                models.append(name.strip())
+        return models
 
     @property
     def jellyseerr_base_url(self) -> str:
