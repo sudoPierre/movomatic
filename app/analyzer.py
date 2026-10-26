@@ -53,6 +53,8 @@ class GeminiAnalyzer:
             response_mime_type="application/json",
             response_schema=MediaIdentification,
             temperature=0.1,
+            # No tools are used: skip the SDK's function-calling loop (and its log line).
+            automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
         )
 
     async def analyze_metadata(self, meta: ReelMetadata) -> MediaIdentification:
