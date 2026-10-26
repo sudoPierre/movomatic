@@ -1,0 +1,39 @@
+[Unit]
+Description=Movomatic — Instagram Reel ➜ Gemini ➜ Jellyseerr
+Documentation=https://github.com/YOUR_GITHUB_USER/movomatic
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=movomatic
+Group=movomatic
+WorkingDirectory=/opt/movomatic
+EnvironmentFile=/etc/movomatic/movomatic.env
+Environment=PYTHONUNBUFFERED=1
+Environment=XDG_CACHE_HOME=/var/cache/movomatic
+ExecStart=/opt/movomatic/.venv/bin/movomatic
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+
+# Répertoires gérés par systemd (créés avec les bons droits) :
+#   /var/lib/movomatic   -> cookies Instagram (cookies.txt)
+#   /var/cache/movomatic -> cache yt-dlp
+StateDirectory=movomatic
+CacheDirectory=movomatic
+PrivateTmp=true
+
+# Durcissement. Si le service échoue avec "226/NAMESPACE" dans un LXC non privilégié,
+# activez l'option "nesting" du conteneur ou commentez les lignes Protect*/Private*.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectControlGroups=true
+ProtectKernelModules=true
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+[Install]
+WantedBy=multi-user.target
